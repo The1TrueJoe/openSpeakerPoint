@@ -1,0 +1,2 @@
+# Custom app packages live under package/<name>/ - see apps/README.md.
+source "$BR2_EXTERNAL_SPEAKERPOINT_PATH/package/example-daemon/Config.in"

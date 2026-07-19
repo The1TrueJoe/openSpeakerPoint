@@ -1,0 +1,66 @@
+name: Build firmware image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "br-external/**"
+      - "apps/**"
+      - "buildroot"
+      - "build.sh"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "br-external/**"
+      - "apps/**"
+      - "buildroot"
+      - "build.sh"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A cold-cache first run does a full Buildroot toolchain build and can
+    # take several hours. Once the dl/ and output caches below are warm,
+    # subsequent runs are much faster.
+    timeout-minutes: 360
+    steps:
+      - name: Check out repo (with buildroot submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex git rsync unzip wget cpio file \
+            python3 python3-dev libncurses-dev libssl-dev cvs subversion mercurial
+
+      - name: Cache Buildroot download cache
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: br-dl-${{ hashFiles('br-external/configs/speakerpoint_defconfig') }}
+          restore-keys: |
+            br-dl-
+
+      - name: Cache Buildroot output (toolchain + build state)
+        uses: actions/cache@v4
+        with:
+          path: output
+          key: br-output-${{ hashFiles('br-external/configs/speakerpoint_defconfig', 'br-external/board/speakerpoint/linux.fragment') }}
+          restore-keys: |
+            br-output-
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: speakerpoint-images
+          path: |
+            output/images/*
+          if-no-files-found: error

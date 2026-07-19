@@ -1,0 +1,8 @@
+config BR2_PACKAGE_EXAMPLE_DAEMON
+	bool "example-daemon"
+	help
+	  Minimal placeholder app (apps/example-daemon) demonstrating how
+	  custom SpeakerPoint applications, developed under apps/ in this
+	  same repo, are wired into the Buildroot package system. Copy
+	  this package directory as a starting template for real apps -
+	  see apps/README.md.

@@ -1,0 +1,11 @@
+.DS_Store
+
+# Buildroot build output and download cache - never committed, always
+# reproducible from br-external/ + the pinned buildroot/ submodule.
+/output/
+/dl/
+
+# Python
+__pycache__/
+*.pyc
+

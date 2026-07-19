@@ -1,0 +1,112 @@
+# Fragment on top of the in-tree "ep93xx" defconfig, which already
+# builds in MTD + CFI Intel + the RedBoot partition parser (the stock
+# board has Intel JS28F128 CFI NOR flash with a RedBoot partition
+# table - see Research/Speakerpoint/findings.md). We boot straight off
+# mtdblock (root=/dev/mtdblock3, set by RedBoot's boot script, which we
+# are not changing).
+#
+# No initrd/modules on this image - build everything in.
+CONFIG_MODULES=n
+
+# devtmpfs so /dev is populated without a static device table.
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# Root filesystem: read-only squashfs on mtdblock3 (ep93xx_defconfig
+# only enables jffs2/ext/nfs by default).
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+
+# Trim what this first "does it boot & answer SSH + serve a page"
+# milestone doesn't need, to keep the zImage small. Re-enable as later
+# phases bring up audio/USB/etc.
+CONFIG_USB=n
+CONFIG_MMC=n
+CONFIG_FB=n
+CONFIG_LOGO=n
+CONFIG_SPI=n
+CONFIG_SCSI=n
+CONFIG_EEPROM_LEGACY=n
+CONFIG_IPV6=n
+CONFIG_NFS_FS=n
+CONFIG_ROOT_NFS=n
+CONFIG_VFAT_FS=n
+CONFIG_EXT4_FS=n
+CONFIG_EXT2_FS=n
+CONFIG_RTC_DRV_DS1307=n
+CONFIG_RTC_DRV_M48T86=n
+CONFIG_WATCHDOG=n
+CONFIG_EP93XX_WATCHDOG=n
+CONFIG_I2C_DEBUG_CORE=n
+CONFIG_I2C_DEBUG_ALGO=n
+CONFIG_I2C_DEBUG_BUS=n
+
+# We're only building for our one actual board.
+CONFIG_MACH_EDB9302=n
+CONFIG_MACH_EDB9302A=n
+CONFIG_MACH_EDB9307=n
+CONFIG_MACH_EDB9307A=n
+CONFIG_MACH_EDB9312=n
+CONFIG_MACH_EDB9315=n
+CONFIG_MACH_EDB9315A=n
+CONFIG_MACH_TS72XX=n
+CONFIG_MACH_VISION_EP9307=n
+
+# --- Size trimming: zImage+DTB must fit the 1MB mtd2 partition. The
+# ep93xx_defconfig baseline came out to ~3MB, well over budget. ---
+
+# Optimize for size, not speed - no FPU/hard realtime requirements here.
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+
+# Full kernel symbol table is a surprisingly large chunk of a small
+# embedded kernel; we only have the serial console for debugging, and
+# panics/oops still print addresses without this, just not resolved
+# symbol names. Turn back on temporarily if debugging a crash.
+CONFIG_KALLSYMS=n
+
+# This board has NOR (CFI) flash only, never NAND, but ep93xx_defconfig
+# pulls in the entire raw-NAND subsystem (core, bbt, ecc, every vendor
+# ID table) by default - pure dead weight here.
+CONFIG_MTD_NAND_CORE=n
+CONFIG_MTD_RAW_NAND=n
+
+# Nothing in this image uses JFFS2 (mtd3 rootfs is squashfs; mtd4 /data
+# is left blank/unformatted for this milestone). Revisit if a later
+# phase starts mounting /data as jffs2.
+CONFIG_JFFS2_FS=n
+
+# IPsec/netfilter - not needed for plain SSH + HTTP.
+CONFIG_NETFILTER=n
+CONFIG_NET_KEY=n
+CONFIG_XFRM_USER=n
+CONFIG_XFRM_STATISTICS=n
+CONFIG_XFRM_ESP=n
+
+# No PTP-capable NIC and no GPS/PPS source on this board.
+CONFIG_PTP_1588_CLOCK=n
+CONFIG_PPS=n
+
+# Needed so RedBoot can netboot a kernel+initramfs pair over TFTP for
+# recovery-safe testing without ever writing to flash - see
+# tools/tftp-serve.sh and docs/hardware.md "Network boot" section.
+CONFIG_BLK_DEV_INITRD=y
+
+# --- More size trimming: ep93xx_defconfig enables a bunch of kernel
+# debug/trace infra and unused drivers by default; none of it belongs
+# in a small recovery-firmware kernel. ---
+CONFIG_FTRACE=n
+CONFIG_SLUB_DEBUG=n
+CONFIG_BLK_DEV_NBD=n
+CONFIG_IKCONFIG=n
+CONFIG_IKCONFIG_PROC=n
+CONFIG_BPF=n
+CONFIG_BPF_SYSCALL=n
+CONFIG_MAGIC_SYSRQ=n
+CONFIG_NLS=n
+# Backtrace unwinder is far less useful with CONFIG_KALLSYMS off anyway.
+CONFIG_ARM_UNWIND=n
+
+# NOTE: the kernel image compression format (gzip vs xz) is chosen via
+# the Buildroot-level BR2_LINUX_KERNEL_XZ option in the defconfig, not
+# a kernel Kconfig fragment symbol - Buildroot force-overwrites
+# CONFIG_KERNEL_* here regardless of what a fragment says.
