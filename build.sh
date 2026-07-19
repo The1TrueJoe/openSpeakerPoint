@@ -16,14 +16,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILDROOT_DIR="$ROOT/buildroot"
+BUILDROOT_DIR="${BUILDROOT_DIR:-$ROOT/buildroot}"
 EXTERNAL_DIR="$ROOT/br-external"
 OUTPUT_DIR="${BR2_OUTPUT_DIR:-$ROOT/output}"
 DL_DIR="${BR2_DL_DIR:-$ROOT/dl}"
 
 if [ ! -f "$BUILDROOT_DIR/Makefile" ]; then
-    echo "error: buildroot/ submodule is not checked out." >&2
-    echo "       run: git submodule update --init --recursive" >&2
+    echo "error: Buildroot source tree not found at: $BUILDROOT_DIR" >&2
+    echo "       set BUILDROOT_DIR or build via the Docker image." >&2
     exit 1
 fi
 

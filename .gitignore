@@ -1,7 +1,6 @@
 .DS_Store
 
-# Buildroot build output and download cache - never committed, always
-# reproducible from br-external/ + the pinned buildroot/ submodule.
+# Build output and download cache are never committed.
 /output/
 /dl/
 

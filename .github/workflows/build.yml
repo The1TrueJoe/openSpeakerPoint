@@ -7,15 +7,15 @@ on:
     paths:
       - "br-external/**"
       - "apps/**"
-      - "buildroot"
       - "build.sh"
+      - "Dockerfile"
       - ".github/workflows/build.yml"
   pull_request:
     paths:
       - "br-external/**"
       - "apps/**"
-      - "buildroot"
       - "build.sh"
+      - "Dockerfile"
       - ".github/workflows/build.yml"
 
 jobs:
@@ -26,36 +26,18 @@ jobs:
     # subsequent runs are much faster.
     timeout-minutes: 360
     steps:
-      - name: Check out repo (with buildroot submodule)
+      - name: Check out repo
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install host build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bc bison flex git rsync unzip wget cpio file \
-            python3 python3-dev libncurses-dev libssl-dev cvs subversion mercurial
-
-      - name: Cache Buildroot download cache
-        uses: actions/cache@v4
-        with:
-          path: dl
-          key: br-dl-${{ hashFiles('br-external/configs/speakerpoint_defconfig') }}
-          restore-keys: |
-            br-dl-
-
-      - name: Cache Buildroot output (toolchain + build state)
-        uses: actions/cache@v4
-        with:
-          path: output
-          key: br-output-${{ hashFiles('br-external/configs/speakerpoint_defconfig', 'br-external/board/speakerpoint/linux.fragment') }}
-          restore-keys: |
-            br-output-
 
       - name: Build
-        run: ./build.sh
+        run: docker build -t speakerpoint-build .
+
+      - name: Extract images
+        run: |
+          cid=$(docker create speakerpoint-build)
+          mkdir -p output/images
+          docker cp "$cid":/artifacts/. output/images/
+          docker rm "$cid"
 
       - name: Upload images
         uses: actions/upload-artifact@v4
