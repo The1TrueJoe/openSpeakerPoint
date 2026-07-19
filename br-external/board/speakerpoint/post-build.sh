@@ -8,6 +8,11 @@ set -e
 
 TARGET_DIR="$1"
 
+if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
+	echo "error: invalid TARGET_DIR passed to post-build hook: '$TARGET_DIR'" >&2
+	exit 1
+fi
+
 # /var/run -> /run (tmpfs). Leaves the rest of /var (e.g. /var/www/data,
 # our static site content) as real, read-only files from the image.
 rm -rf "$TARGET_DIR/var/run"

@@ -29,15 +29,8 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Build
-        run: docker build -t speakerpoint-build .
-
-      - name: Extract images
-        run: |
-          cid=$(docker create speakerpoint-build)
-          mkdir -p output/images
-          docker cp "$cid":/artifacts/. output/images/
-          docker rm "$cid"
+      - name: Build firmware and export images
+        run: docker build --target artifacts --output type=local,dest=./output .
 
       - name: Upload images
         uses: actions/upload-artifact@v4

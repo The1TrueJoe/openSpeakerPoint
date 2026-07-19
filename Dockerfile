@@ -1,12 +1,10 @@
 # Buildroot build container.
 #
-# Builds the firmware entirely inside Docker so the host only needs Docker.
+# Provides a reproducible build environment and builds firmware during
+# `docker build`, then exports only final images.
 #
 # Usage (from repo root):
-#   docker build -t speakerpoint-build .
-#   cid=$(docker create speakerpoint-build)
-#   docker cp "$cid":/artifacts ./output-images
-#   docker rm "$cid"
+#   docker build --target artifacts --output type=local,dest=./output .
 FROM debian:bookworm-slim AS build-env
 
 ARG BUILDROOT_REPO=https://github.com/buildroot/buildroot
@@ -56,4 +54,4 @@ RUN bash ./build.sh
 
 FROM scratch AS artifacts
 
-COPY --from=build-env /src/output/images/ /artifacts/
+COPY --from=build-env /src/output/images/ /images/

@@ -36,4 +36,4 @@ if [ "$#" -eq 0 ]; then
     set -- all
 fi
 
-exec make -C "$BUILDROOT_DIR" O="$OUTPUT_DIR" BR2_DL_DIR="$DL_DIR" "$@"
+exec make -C "$BUILDROOT_DIR" O="$OUTPUT_DIR" BR2_EXTERNAL="$EXTERNAL_DIR" BR2_DL_DIR="$DL_DIR" "$@"

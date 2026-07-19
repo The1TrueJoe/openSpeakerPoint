@@ -33,24 +33,12 @@ phased project plan.
 
 ```sh
 git clone <this repo>
-docker build -t speakerpoint-build .
-cid=$(docker create speakerpoint-build)
-docker cp "$cid":/artifacts ./output-images
-docker rm "$cid"
-
-# or, if you want to run it directly on the host with your own Buildroot checkout:
-# BUILDROOT_DIR=/path/to/buildroot ./build.sh
+cd control4-speakerpoint-modern
+docker build --target artifacts --output type=local,dest=./output .
 ```
 
-Docker-built artifacts land in `./output-images/`: `zImage.ep93xx-speakerpoint` (kernel+DTB,
-appended, for flashing to mtd2), `rootfs.squashfs` (mtd3), and
-`rootfs.cpio.gz` (initramfs, for netboot without touching mtd3 at all).
-
-Preferred build path: use the Docker image, which carries the Buildroot
-checkout internally and performs the full firmware build during `docker build`.
-
-Other useful targets: `./build.sh menuconfig`, `./build.sh linux-menuconfig`,
-`./build.sh clean`.
+This builds everything inside Docker and exports final images to `output/images`
+with no runtime bind-mounted build flow.
 
 ## Testing a build (recommended: TFTP netboot, no flash writes)
 
@@ -73,7 +61,6 @@ flashing, see "Recovery path" there.
 ## CI
 
 Pushes/PRs touching `br-external/`, `apps/`, `build.sh`, or `Dockerfile`
-trigger a GitHub Actions build (`.github/workflows/build.yml`) that builds the
-firmware image entirely inside Docker, extracts `output/images/*`, and uploads
-those files as a build artifact. The first build is still slow because it
-includes a full Buildroot toolchain build.
+trigger a GitHub Actions build (`.github/workflows/build.yml`) that builds in
+Docker and exports `output/images/*` as a build artifact. The first build is
+still slow because it includes a full Buildroot toolchain build.
