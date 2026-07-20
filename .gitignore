@@ -7,4 +7,8 @@
 # Python
 __pycache__/
 *.pyc
+venv/
+.venv/
 
+# Buildroot if chosen to clone the buildroot repo
+buildroot/

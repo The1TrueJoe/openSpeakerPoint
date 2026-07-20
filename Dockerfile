@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Buildroot build container.
 #
 # Provides a reproducible build environment and builds firmware during
@@ -9,6 +11,8 @@ FROM debian:bookworm-slim AS build-env
 
 ARG BUILDROOT_REPO=https://github.com/buildroot/buildroot
 ARG BUILDROOT_REF=master
+ARG BR2_JLEVEL=
+ARG TOPLEVEL_JOBS=
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -50,8 +54,13 @@ USER builder
 WORKDIR /src
 COPY --chown=builder:builder . /src
 
-RUN bash ./build.sh
+RUN --mount=type=cache,target=/src/dl,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/output,uid=1000,gid=1000 \
+    BR2_JLEVEL="$BR2_JLEVEL" TOPLEVEL_JOBS="$TOPLEVEL_JOBS" bash ./build.sh \
+    && rm -rf /tmp/artifacts \
+    && mkdir -p /tmp/artifacts \
+    && cp -a /src/output/images/. /tmp/artifacts/
 
 FROM scratch AS artifacts
 
-COPY --from=build-env /src/output/images/ /images/
+COPY --from=build-env /tmp/artifacts/ /images/

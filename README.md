@@ -35,10 +35,32 @@ phased project plan.
 git clone <this repo>
 cd control4-speakerpoint-modern
 docker build --target artifacts --output type=local,dest=./output .
+
+# optional: push harder on CPU parallelism (example values)
+docker build \
+  --build-arg BR2_JLEVEL=6 \
+  --target artifacts --output type=local,dest=./output .
+
+# optional: add top-level parallelism too (faster, but more RAM-hungry)
+docker build \
+  --build-arg BR2_JLEVEL=6 \
+  --build-arg TOPLEVEL_JOBS=4 \
+  --target artifacts --output type=local,dest=./output .
 ```
 
 This builds everything inside Docker and exports final images to `output/images`
 with no runtime bind-mounted build flow.
+
+Speed notes:
+- The Dockerfile now uses BuildKit cache mounts for `dl/` and `output/`, so
+  repeat builds on the same machine are much faster.
+- `build.sh` now auto-tunes `BR2_JLEVEL` from available CPU and RAM when you do
+  not set it explicitly.
+- `BR2_JLEVEL` controls per-package parallel jobs (recommended primary knob).
+- `TOPLEVEL_JOBS` enables Buildroot top-level parallelization (`make -j`), which
+  is faster but still considered experimental by Buildroot and uses more memory.
+- If you are on Docker Desktop, increasing allocated CPUs/RAM in settings has a
+  big impact on first-build time.
 
 ## Testing a build (recommended: TFTP netboot, no flash writes)
 

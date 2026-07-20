@@ -1,12 +1,18 @@
 # Fragment on top of the in-tree "ep93xx" defconfig, which already
 # builds in MTD + CFI Intel + the RedBoot partition parser (the stock
 # board has Intel JS28F128 CFI NOR flash with a RedBoot partition
-# table - see Research/Speakerpoint/findings.md). We boot straight off
-# mtdblock (root=/dev/mtdblock3, set by RedBoot's boot script, which we
-# are not changing).
+# table - see Research/Speakerpoint/Notes.txt). Partitions are
+# discovered at runtime from the on-flash FIS directory (DT
+# "redboot-fis" node in the board .dts), matching the stock kernel's
+# root=/dev/mtdblock3.
 #
 # No initrd/modules on this image - build everything in.
 CONFIG_MODULES=n
+
+# Provide a safe fallback rootfs cmdline for manual `exec` boot while also
+# pinning serial console speed to match RedBoot/getty.
+CONFIG_CMDLINE="root=/dev/mtdblock3 ro rootfstype=squashfs console=ttyAM0,57600"
+CONFIG_CMDLINE_EXTEND=y
 
 # devtmpfs so /dev is populated without a static device table.
 CONFIG_DEVTMPFS=y
@@ -14,6 +20,12 @@ CONFIG_DEVTMPFS_MOUNT=y
 
 # Root filesystem: read-only squashfs on mtdblock3 (ep93xx_defconfig
 # only enables jffs2/ext/nfs by default).
+CONFIG_MTD=y
+CONFIG_MTD_BLOCK=y
+CONFIG_MTD_CFI=y
+CONFIG_MTD_CFI_INTELEXT=y
+CONFIG_MTD_PHYSMAP=y
+CONFIG_MTD_REDBOOT_PARTS=y
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_XZ=y
 
