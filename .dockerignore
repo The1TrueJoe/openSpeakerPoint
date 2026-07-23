@@ -5,3 +5,11 @@ output
 __pycache__
 *.pyc
 .DS_Store
+.venv
+Research
+# Node build artifacts - the dashboard is (re)built inside the container.
+**/node_modules
+apps/speakerpoint-dashboard/dist
+# Host-built binaries - rebuilt by Buildroot for the target.
+apps/speakerpoint-control/speakerpoint-control
+apps/speakerpoint-control/src/*.o

@@ -1,8 +1,12 @@
+# MacOS
 .DS_Store
 
 # Build output and download cache are never committed.
 /output/
 /dl/
+
+# Buildroot if chosen to clone the buildroot repo
+buildroot/
 
 # Python
 __pycache__/
@@ -10,5 +14,7 @@ __pycache__/
 venv/
 .venv/
 
-# Buildroot if chosen to clone the buildroot repo
-buildroot/
+# IDEs and Agents
+.idea/
+.vscode/
+.claude/

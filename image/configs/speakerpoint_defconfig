@@ -1,0 +1,79 @@
+BR2_arm=y
+BR2_arm920t=y
+# Optimize every package for size (-Os), not speed. This board is flash- and
+# RAM-constrained (the rootfs is netbooted as an initramfs into 32 MB RAM);
+# the audio path is not CPU-bound enough to miss -O2.
+BR2_OPTIMIZE_S=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+# No C++ in the image: the media engine is mpg123 (pure C), not mpd, so we
+# avoid pulling in libstdc++/libfmt - a large RAM saving on the initramfs.
+# Dynamic linking (musl's shared libs are lightweight, unlike glibc's) so
+# every binary shares one copy of libc/alsa-lib/ncurses/etc. instead of each
+# statically duplicating them - the actual fix for multi-binary bloat like
+# alsa-utils, rather than trimming one package at a time.
+BR2_SHARED_LIBS=y
+BR2_TARGET_GENERIC_HOSTNAME="speakerpoint"
+BR2_TARGET_GENERIC_ISSUE="Modern Speakerpoint firmware"
+BR2_TARGET_GENERIC_ROOT_PASSWD="speakerpoint"
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAM0"
+# BR2_TARGET_GENERIC_GETTY_BAUDRATE_KEEP is not set
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_57600=y
+BR2_SYSTEM_DHCP="eth0"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/post-build.sh"
+# Buildroot only auto-applies patches from a package's own internal
+# package/<name>/ dir or from $(BR2_GLOBAL_PATCH_DIR)/<name>/ - dropping a
+# patch in our own image/package/<name>/ does nothing without this, since
+# BR2_EXTERNAL package dirs aren't scanned for patches by name alone.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/package"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_DEFCONFIG="ep93xx"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/linux.fragment"
+# XZ compresses noticeably better than gzip (RAM is no constraint at
+# boot decompression time; mtd2 flash space very much is).
+BR2_LINUX_KERNEL_XZ=y
+# RedBoot doesn't know how to pass a separate DTB, so append it to the
+# zImage (RedBoot just loads+execs the whole blob like it always has).
+BR2_LINUX_KERNEL_APPENDED_ZIMAGE=y
+BR2_LINUX_KERNEL_CUSTOM_DTS_DIR="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/dts-overlay"
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="cirrus/ep93xx-speakerpoint"
+BR2_PACKAGE_MTD=y
+BR2_PACKAGE_BUSYBOX_HTTPD=y
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/busybox.fragment"
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_SPEAKERPOINT_CONTROL=y
+BR2_PACKAGE_EP93XX_AC97=y
+# alsa-utils for testing the AC97/STAC9758 audio path: amixer to unmute/set
+# Master Out (AC97 codecs power up muted), aplay for real playback, and
+# speaker-test for a quick tone without needing a test file on target.
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# alsamixer defaults to y and pulls in ncurses for its interactive TUI, which
+# this headless board (serial console + network only, no local display) has
+# no use for; amixer already covers scripted mixer control non-interactively.
+# BR2_PACKAGE_ALSA_UTILS_ALSAMIXER is not set
+# i2c-tools (i2cdetect/i2cget/i2cset) for bringing up the D241051QR amp over
+# the i2c-gpio bus: confirm which address (0x59/0x5a) actually responds and
+# manually replay the recovered init sequence before writing a permanent
+# driver/init script.
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+BR2_PACKAGE_I2C_TOOLS=y
+# Dynamic /dev + hotplug via BusyBox mdev, so an inserted USB drive gets a
+# device node and fires our automount rule (see mdev.conf in the overlay).
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
+# mpg123: the media engine. A small pure-C MP3 player; the control daemon
+# drives it in remote-control mode (-R) for play/pause/seek/position and
+# parses ID3 tags + embedded album art itself. MP3-only, chosen over mpd to
+# keep the netbooted initramfs small.
+BR2_PACKAGE_MPG123=y
+BR2_TARGET_ROOTFS_SQUASHFS=y
+BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
+# BR2_TARGET_ROOTFS_TAR is not set
+# Also build a gzip cpio image of the same rootfs, for use as a RedBoot
+# TFTP-loaded initramfs (see tools/tftp-serve.sh). This lets a whole new
+# kernel+rootfs pair be netbooted and tested entirely from RAM before
+# anything is written to flash.
+BR2_TARGET_ROOTFS_CPIO=y
+BR2_TARGET_ROOTFS_CPIO_GZIP=y

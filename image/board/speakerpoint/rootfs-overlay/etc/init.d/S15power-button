@@ -1,0 +1,78 @@
+#!/bin/sh
+# Front-panel power button -> reboot.
+#
+# The stock pbutton.o drives this off the EP93xx GPIO combined interrupt
+# (request_irq(59)) and its handler tests bit 1 of Port A's interrupt status
+# while reading Port A's data register - i.e. the button is Port A line 1
+# (gpio0 line 1), and it prints "pbutton: Resetting" on press. We don't have
+# libgpiod / a gpio-keys event reader in this image, so instead we poll that
+# same GPIO line directly via devmem and invoke reboot (which now performs a
+# real hardware reset via the watchdog - see S01z-ep93xx-reset).
+#
+# Assumptions to CONFIRM on hardware (both easy to change below):
+#   - button is Port A line 1  -> PADR 0x80840000, bit mask 0x02
+#   - button is active-low (pressed reads 0)
+# Verify with:  watch the value of `devmem 0x80840000` while pressing.
+# If the button turns out to be a different bit/polarity, edit BTN_MASK /
+# PRESSED_LEVEL.
+
+PADR=0x80840000        # Port A data register
+PADDR=0x80840010       # Port A data-direction register
+BTN_MASK=0x02          # Port A bit 1
+PRESSED_LEVEL=0        # active-low: masked value == 0 means pressed
+POLL_SECS=1            # poll interval (integer; power-button latency)
+PIDFILE=/var/run/power-button.pid
+
+masked() {
+	# echo the button bit (0 or non-zero) from the current PADR value
+	v=$(devmem $PADR)
+	echo $(( v & BTN_MASK ))
+}
+
+watch_loop() {
+	# Require the line to be seen released once before we ever act, so a
+	# line that happens to read "pressed" at boot can't trigger an instant
+	# reboot loop.
+	seen_release=0
+	while : ; do
+		m=$(masked)
+		if [ "$PRESSED_LEVEL" = "0" ]; then
+			pressed=$([ "$m" -eq 0 ] && echo 1 || echo 0)
+		else
+			pressed=$([ "$m" -ne 0 ] && echo 1 || echo 0)
+		fi
+
+		if [ "$pressed" = "0" ]; then
+			seen_release=1
+		elif [ "$seen_release" = "1" ]; then
+			# debounce: confirm still pressed a moment later
+			sleep 1
+			m=$(masked)
+			if [ "$PRESSED_LEVEL" = "0" ]; then
+				[ "$(( m & BTN_MASK ))" -eq 0 ] && { logger -t power-button "press -> reboot"; reboot; exit 0; }
+			else
+				[ "$(( m & BTN_MASK ))" -ne 0 ] && { logger -t power-button "press -> reboot"; reboot; exit 0; }
+			fi
+		fi
+		sleep "$POLL_SECS"
+	done
+}
+
+case "$1" in
+start)
+	# Ensure the button line is an input (dir bit = 0).
+	v=$(devmem $PADDR); devmem $PADDR 32 $(( v & ~BTN_MASK ))
+	watch_loop &
+	echo $! > "$PIDFILE"
+	;;
+stop)
+	[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+	rm -f "$PIDFILE"
+	;;
+*)
+	echo "Usage: $0 {start|stop}" >&2
+	exit 1
+	;;
+esac
+
+exit 0

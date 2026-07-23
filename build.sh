@@ -6,6 +6,7 @@
 #   ./build.sh menuconfig       # any other buildroot/kernel make target
 #   ./build.sh linux-menuconfig
 #   ./build.sh clean
+#   ./build.sh dev-binary       # fast local build of apps/speakerpoint-control only
 #
 # This script is the single thing local dev, Docker, and CI all call, so
 # there's exactly one build path to keep working.
@@ -22,9 +23,102 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDROOT_DIR="${BUILDROOT_DIR:-$ROOT/buildroot}"
-EXTERNAL_DIR="$ROOT/br-external"
+EXTERNAL_DIR="$ROOT/image"
 OUTPUT_DIR="${BR2_OUTPUT_DIR:-$ROOT/output}"
 DL_DIR="${BR2_DL_DIR:-$ROOT/dl}"
+
+build_dev_binary() {
+    local app_dir="$ROOT/apps/speakerpoint-control"
+
+    if [ ! -f "$app_dir/Makefile" ]; then
+        echo "error: missing app Makefile at: $app_dir/Makefile" >&2
+        exit 1
+    fi
+
+    echo "info: building development binary in apps/speakerpoint-control"
+    make -C "$app_dir" clean speakerpoint-control
+    echo "info: built $app_dir/speakerpoint-control"
+}
+
+build_dashboard_assets() {
+    local dashboard_dir="$ROOT/apps/speakerpoint-dashboard"
+    local dashboard_dist="$dashboard_dir/dist"
+    local overlay_www="$ROOT/image/board/speakerpoint/rootfs-overlay/var/www/data"
+
+    if [ ! -f "$dashboard_dir/package.json" ]; then
+        echo "error: missing dashboard package.json at: $dashboard_dir/package.json" >&2
+        exit 1
+    fi
+
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        echo "error: node and npm are required to build dashboard assets" >&2
+        exit 1
+    fi
+
+    echo "info: building dashboard (Vite/React/TypeScript) with node"
+    if [ -f "$dashboard_dir/package-lock.json" ]; then
+        npm --prefix "$dashboard_dir" ci --no-audit --no-fund
+    else
+        npm --prefix "$dashboard_dir" install --no-audit --no-fund
+    fi
+
+    npm --prefix "$dashboard_dir" run build
+
+    # The Vite build emits a complete static site (index.html + hashed
+    # assets) into dist/. Sync the whole tree into the rootfs overlay www
+    # dir, which is a build-output location (gitignored) fed solely from the
+    # dashboard source - there is no hand-written index.html any more.
+    rm -rf "$overlay_www"
+    mkdir -p "$overlay_www"
+    cp -a "$dashboard_dist/." "$overlay_www/"
+    echo "info: installed dashboard site into rootfs overlay ($overlay_www)"
+}
+
+should_build_dashboard_assets() {
+    local target
+    if [ "$#" -eq 0 ]; then
+        return 0
+    fi
+
+    for target in "$@"; do
+        case "$target" in
+            clean|distclean|mrproper|menuconfig|linux-menuconfig|busybox-menuconfig|help)
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+# Buildroot's linux package doesn't track image/board/speakerpoint/dts-overlay
+# or the apps/ep93xx-ac97 driver sources (injected via LINUX_POST_PATCH_HOOKS)
+# as build dependencies, so editing them alone does not invalidate the
+# package's stamps.
+should_force_linux_rebuild() {
+    local target
+    for target in "$@"; do
+        case "$target" in
+            clean|distclean|mrproper|menuconfig|linux-menuconfig|busybox-menuconfig|help|linux-dirclean|linux-rebuild|linux-reconfigure)
+                return 1
+                ;;
+        esac
+    done
+
+    return 0
+}
+
+if [ "${1:-}" = "dev-binary" ]; then
+    shift
+    if [ "$#" -gt 0 ]; then
+        echo "error: dev-binary does not accept additional args" >&2
+        exit 1
+    fi
+    build_dev_binary
+    exit 0
+fi
 
 is_pos_int() {
     case "$1" in
@@ -123,8 +217,43 @@ mkdir -p "$OUTPUT_DIR" "$DL_DIR"
 
 make "${MAKE_ARGS[@]}" speakerpoint_defconfig
 
+# Toolchain-wide config changes (BR2_STATIC_LIBS <-> BR2_SHARED_LIBS, a
+# different BR2_TOOLCHAIN_BUILDROOT_MUSL/glibc choice, etc.) aren't picked
+# up by anything else in this script: the toolchain packages (musl,
+# host-gcc-final, ...) are foundational enough that packages built against
+# the old config (e.g. a static-only musl with no real libc.so) get reused
+# as-is, silently producing broken links in anything built afterward. Opt
+# into this explicitly (FORCE_CLEAN=1 ./build.sh, or
+# --build-arg FORCE_CLEAN=1 for the Docker build) only when such a change
+# was actually made - it's a real `make clean`, wiping build/host/target/
+# images (downloads in $DL_DIR are kept), so it costs a full rebuild.
+if [ -n "${FORCE_CLEAN:-}" ]; then
+    echo "info: FORCE_CLEAN set - running a full 'make clean' before the real build (toolchain-wide config change)"
+    make "${MAKE_ARGS[@]}" clean
+fi
+
 if [ "$#" -eq 0 ]; then
     set -- all
+fi
+
+if should_build_dashboard_assets "$@"; then
+    build_dashboard_assets
+fi
+
+if should_force_linux_rebuild "$@"; then
+    echo "info: forcing a clean linux package rebuild (DTS overlay / injected driver sources aren't tracked as build deps, and only dirclean re-runs the patch step that copies them in)"
+    make "${MAKE_ARGS[@]}" "${TOPLEVEL_ARGS[@]}" linux-dirclean
+fi
+
+# Same staleness class as linux, for any other package we patch via
+# BR2_GLOBAL_PATCH_DIR (image/package/<name>/*.patch): Buildroot's stamps
+# don't know our patch changed, so a package already extracted+patched from
+# an earlier build (e.g. one that failed later, at build/link) keeps its
+# stale .stamp_patched and pre-patch object files forever without this.
+# Add future patched packages here the same way if this bites again.
+if should_force_linux_rebuild "$@"; then
+    echo "info: forcing a clean i2c-tools rebuild (image/package/i2c-tools/*.patch isn't tracked as a build dep either)"
+    make "${MAKE_ARGS[@]}" "${TOPLEVEL_ARGS[@]}" i2c-tools-dirclean
 fi
 
 set +e

@@ -1,0 +1,238 @@
+# Fragment on top of the in-tree "ep93xx" defconfig, which already
+# builds in MTD + CFI Intel + the RedBoot partition parser (the stock
+# board has Intel JS28F128 CFI NOR flash with a RedBoot partition
+# table - see Research/Speakerpoint/Notes.txt). Partitions are
+# discovered at runtime from the on-flash FIS directory (DT
+# "redboot-fis" node in the board .dts), matching the stock kernel's
+# root=/dev/mtdblock3.
+#
+# Modules are disabled to keep the image self-contained and bootable.
+# CONFIG_MODULES=y was confirmed to cause completely silent boot failure on
+# this board (EP9301, ARM920T) - root cause unknown.  Out-of-tree drivers
+# are injected into the kernel source tree by the ep93xx-ac97 Buildroot
+# package via LINUX_POST_PATCH_HOOKS (see image/package/ep93xx-ac97/).
+CONFIG_MODULES=n
+
+# EP93xx AC97 controller and SpeakerPoint card driver (injected into kernel
+# tree by the ep93xx-ac97 Buildroot package before the kernel is built).
+CONFIG_SND_EP93XX_SOC_AC97=y
+CONFIG_SND_SOC_SPEAKERPOINT=y
+
+# Provide a safe fallback rootfs cmdline for manual `exec` boot while also
+# pinning serial console speed to match RedBoot/getty.
+CONFIG_CMDLINE="root=/dev/mtdblock3 ro rootfstype=squashfs console=ttyAM0,57600"
+CONFIG_CMDLINE_EXTEND=y
+
+# devtmpfs so /dev is populated without a static device table.
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# Root filesystem: read-only squashfs on mtdblock3 (ep93xx_defconfig
+# only enables jffs2/ext/nfs by default).
+CONFIG_MTD=y
+CONFIG_MTD_BLOCK=y
+CONFIG_MTD_CFI=y
+CONFIG_MTD_CFI_INTELEXT=y
+CONFIG_MTD_PHYSMAP=y
+CONFIG_MTD_REDBOOT_PARTS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+
+# Audio bring-up for custom firmware.
+#
+# Confirmed stock signal path (from Research/Speakerpoint/jffs2 etc/modules
+# load order: ep93xx-audio → stac9758 → c4d2aud, corroborated by dmesg):
+#
+#   EP93xx audio controller 0x80820000 (AC97 mode)
+#     → STAC9758 AC97 2.3 codec  (mixing / DAC)
+#       → STAC9758 serial digital output (I2S-justified)
+#         → D241051QR DSP amplifier  (I2C cfg at 0x59, I2S audio in)
+#           → 2× RCA line outputs
+#
+# The STAC9758 IS the intended codec and must NOT be bypassed.  It
+# handles all mixing/routing before sending I2S to the D241051QR amp.
+# The 2× RCA outputs come from this AC97→STAC9758→D241051QR path; there
+# is no direct EP93xx-I2S→D241051QR connection on this PCB.
+#
+# Symbols still present in modern mainline kernels:
+#   AC97_BUS           - sound/ac97_bus.c  (bus abstraction layer)
+#   SND_AC97_CODEC     - sound/pci/ac97/   (core AC97 codec layer; handles STAC9758)
+#   SND_SOC_AC97_CODEC - sound/soc/codecs/ac97.c  (ASoC wrapper for AC97 codecs)
+#   SND_EP93XX_SOC     - sound/soc/cirrus/ep93xx-pcm.c  (EP93xx DMA/PCM engine)
+#
+# What was removed from mainline (all in-tree board users were deleted):
+#   sound/soc/cirrus/ep93xx-ac97.c  — EP93xx AC97 controller CPU DAI
+#   SND_SOC_SIMONE, SND_SOC_EDB93XX — board machine drivers, unneeded
+#   SND_SOC_STAC9766 — different chip (not the STAC9758 on this board)
+#
+# ep93xx-ac97.c must be forward-ported from the last in-tree version
+# (~v4.x) and built as an out-of-tree module via the Buildroot package.
+# The three AC97 symbols added below ARE valid for modern kernels and
+# are required for STAC9758 codec operation.
+#
+# OSS compat layers (SND_MIXER_OSS, SND_PCM_OSS) dropped - no OSS apps.
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_TIMER=y
+CONFIG_SND_PCM=y
+CONFIG_SND_SEQUENCER=n
+CONFIG_AC97_BUS=y
+CONFIG_SND_AC97_CODEC=y
+CONFIG_SND_SOC=y
+CONFIG_SND_EP93XX_SOC=y
+CONFIG_SND_SOC_AC97_CODEC=y
+# Needed for /proc/asound/card0/codec97#0/ac97#0-0+regs to accept writes
+# (snd_ac97_proc_regs_write() in sound/pci/ac97/ac97_proc.c is gated behind
+# this) - used to manually test the exact register/bit sequence recovered
+# from the stock stac9758.o driver's stac9758_set_amp(), since our generic
+# ASoC "External Amplifier" switch doesn't appear to touch the same bits
+# this board's hardware actually needs.
+CONFIG_SND_DEBUG=y
+
+# D241051QR DSP amplifier is configured over I2C. EP93xx has no hardware I2C
+# controller at all - mainline confirms every EP93xx board bit-bangs I2C over
+# two fixed GPIO pins (Port G1=SDA, Port G0=SCL) via the generic i2c-gpio
+# driver; CONFIG_I2C_EP93XX doesn't correspond to any real driver and was a
+# no-op. See ac97@80880000's sibling i2c-gpio node in the board DTS for the
+# actual pin wiring.
+CONFIG_I2C=y
+CONFIG_I2C_CHARDEV=y
+CONFIG_I2C_GPIO=y
+
+# Ethernet PHY: only the ICS1893AFLF 10/100 PHY is on this board.
+# Modern kernels have no dedicated ICS1893 driver (CONFIG_ICPLUS_PHY covers
+# IC+ Corp chips, a different vendor).  PHYLIB's built-in generic PHY driver
+# handles ICS1893 via standard MDIO auto-negotiation.  Explicitly disable
+# PHY drivers for chips not present to reduce kernel size.
+CONFIG_PHYLIB=y
+CONFIG_ICPLUS_PHY=n
+CONFIG_AT803X=n
+CONFIG_BCM_NET_PHYLIB=n
+CONFIG_BROADCOM_PHY=n
+CONFIG_CICADA_PHY=n
+CONFIG_DAVICOM_PHY=n
+CONFIG_LXT_PHY=n
+CONFIG_MARVELL_PHY=n
+CONFIG_MICREL_PHY=n
+CONFIG_NATIONAL_PHY=n
+CONFIG_QSEMI_PHY=n
+CONFIG_REALTEK_PHY=n
+CONFIG_SMSC_PHY=n
+CONFIG_STE10XP=n
+CONFIG_VITESSE_PHY=n
+
+# USB mass-storage stack for playing media off the front-panel USB ports.
+# EP93xx has a 2-port OHCI host controller (see EP9301 datasheet, Dual Port
+# USB Host / usb-ohci at 0xff020000 in the stock 2.4 dmesg). Reading a FAT/
+# exFAT thumb drive needs: OHCI + usb-storage + SCSI disk + the filesystems
+# and NLS codepages for long filenames.
+CONFIG_USB=y
+CONFIG_USB_OHCI_HCD=y
+CONFIG_USB_OHCI_HCD_PLATFORM=y
+CONFIG_USB_STORAGE=y
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_VFAT_FS=y
+CONFIG_EXFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+CONFIG_MMC=n
+CONFIG_FB=n
+CONFIG_LOGO=n
+CONFIG_SPI=n
+CONFIG_EEPROM_LEGACY=n
+CONFIG_IPV6=n
+CONFIG_NFS_FS=n
+CONFIG_ROOT_NFS=n
+CONFIG_EXT4_FS=n
+CONFIG_EXT2_FS=n
+CONFIG_RTC_DRV_DS1307=n
+CONFIG_RTC_DRV_M48T86=n
+# EP93xx hardware watchdog - used by the reboot script to guarantee a
+# clean hardware reset on EP93xx when the kernel's software reboot path
+# halts instead of restarting (confirmed on this board).
+CONFIG_WATCHDOG=y
+CONFIG_WATCHDOG_CORE=y
+CONFIG_EP93XX_WATCHDOG=y
+
+# Front-panel LED subsystem (gpio-leds, heartbeat trigger).
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS=y
+CONFIG_LEDS_GPIO=y
+CONFIG_LEDS_TRIGGERS=y
+CONFIG_LEDS_TRIGGER_HEARTBEAT=y
+CONFIG_I2C_DEBUG_CORE=n
+CONFIG_I2C_DEBUG_ALGO=n
+CONFIG_I2C_DEBUG_BUS=n
+
+# We're only building for our one actual board.
+CONFIG_MACH_EDB9302=n
+CONFIG_MACH_EDB9302A=n
+CONFIG_MACH_EDB9307=n
+CONFIG_MACH_EDB9307A=n
+CONFIG_MACH_EDB9312=n
+CONFIG_MACH_EDB9315=n
+CONFIG_MACH_EDB9315A=n
+CONFIG_MACH_TS72XX=n
+CONFIG_MACH_VISION_EP9307=n
+
+# --- Size trimming: zImage+DTB must fit the 1MB mtd2 partition. The
+# ep93xx_defconfig baseline came out to ~3MB, well over budget. ---
+
+# Optimize for size, not speed - no FPU/hard realtime requirements here.
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+
+# Full kernel symbol table is a surprisingly large chunk of a small
+# embedded kernel; we only have the serial console for debugging, and
+# panics/oops still print addresses without this, just not resolved
+# symbol names. Turn back on temporarily if debugging a crash.
+CONFIG_KALLSYMS=n
+
+# This board has NOR (CFI) flash only, never NAND, but ep93xx_defconfig
+# pulls in the entire raw-NAND subsystem (core, bbt, ecc, every vendor
+# ID table) by default - pure dead weight here.
+CONFIG_MTD_NAND_CORE=n
+CONFIG_MTD_RAW_NAND=n
+
+# Nothing in this image uses JFFS2 (mtd3 rootfs is squashfs; mtd4 /data
+# is left blank/unformatted for this milestone). Revisit if a later
+# phase starts mounting /data as jffs2.
+CONFIG_JFFS2_FS=n
+
+# IPsec/netfilter - not needed for plain SSH + HTTP.
+CONFIG_NETFILTER=n
+CONFIG_NET_KEY=n
+CONFIG_XFRM_USER=n
+CONFIG_XFRM_STATISTICS=n
+CONFIG_XFRM_ESP=n
+
+# No PTP-capable NIC and no GPS/PPS source on this board.
+CONFIG_PTP_1588_CLOCK=n
+CONFIG_PPS=n
+
+# Needed so RedBoot can netboot a kernel+initramfs pair over TFTP for
+# recovery-safe testing without ever writing to flash - see
+# tools/tftp-serve.sh and docs/hardware.md "Network boot" section.
+CONFIG_BLK_DEV_INITRD=y
+
+# --- More size trimming: ep93xx_defconfig enables a bunch of kernel
+# debug/trace infra and unused drivers by default; none of it belongs
+# in a small recovery-firmware kernel. ---
+CONFIG_FTRACE=n
+CONFIG_SLUB_DEBUG=n
+CONFIG_BLK_DEV_NBD=n
+CONFIG_IKCONFIG=n
+CONFIG_IKCONFIG_PROC=n
+CONFIG_BPF=n
+CONFIG_BPF_SYSCALL=n
+CONFIG_MAGIC_SYSRQ=y
+# NLS is needed by VFAT/exFAT for the USB drive (CONFIG_NLS_* above); do not
+# disable it here even though it was off in the original no-USB baseline.
+# Backtrace unwinder is far less useful with CONFIG_KALLSYMS off anyway.
+CONFIG_ARM_UNWIND=n
+
+# NOTE: the kernel image compression format (gzip vs xz) is chosen via
+# the Buildroot-level BR2_LINUX_KERNEL_XZ option in the defconfig, not
+# a kernel Kconfig fragment symbol - Buildroot force-overwrites
+# CONFIG_KERNEL_* here regardless of what a fragment says.

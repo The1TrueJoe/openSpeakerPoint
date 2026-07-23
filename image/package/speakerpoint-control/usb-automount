@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# usb-automount - mdev hotplug handler for USB mass-storage partitions.
+#
+# mdev invokes this with $MDEV set to the device name (e.g. sda1) and $ACTION
+# set to add/remove. We mount the partition read-only under /media/usb, which
+# is where the control daemon's media engine (mpg123) looks for MP3s. The
+# daemon re-scans the library on demand (short-cached), so no notification is
+# needed here. Read-only keeps a yanked drive from corrupting.
+
+DEV="/dev/${MDEV}"
+MNT="/media/usb"
+
+case "${ACTION:-add}" in
+remove)
+	umount -f "$MNT" 2>/dev/null || true
+	;;
+add)
+	[ -b "$DEV" ] || exit 0
+	mkdir -p "$MNT"
+	# Only mount if nothing is already mounted there (first partition wins).
+	if ! mountpoint -q "$MNT" 2>/dev/null; then
+		mount -t auto -o ro,noatime "$DEV" "$MNT" 2>/dev/null || exit 0
+	fi
+	;;
+esac
+
+exit 0

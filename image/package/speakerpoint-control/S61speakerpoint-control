@@ -1,0 +1,27 @@
+#!/bin/sh
+
+DAEMON=/usr/bin/speakerpoint-control
+PIDFILE=/var/run/speakerpoint-control.pid
+
+case "$1" in
+	start)
+		printf 'Starting speakerpoint-control: '
+		start-stop-daemon -S -q -m -b -p "$PIDFILE" -x "$DAEMON"
+		echo "OK"
+		;;
+	stop)
+		printf 'Stopping speakerpoint-control: '
+		start-stop-daemon -K -q -p "$PIDFILE"
+		echo "OK"
+		;;
+	restart|reload)
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit 0

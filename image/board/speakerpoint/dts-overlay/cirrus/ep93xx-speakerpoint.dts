@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/*
+ * Device Tree for the Control4 SpeakerPoint (Cirrus EP9301 / EDB9301
+ * reference design). See Research/Speakerpoint/Notes.txt for how this
+ * hardware was identified (register dumps, /proc/mtd, dmesg, etc. from
+ * the stock firmware).
+ *
+ * Boot-stable baseline: NOR flash, Ethernet, serial console,
+ * EP93xx watchdog, GPIO Port D disabled.
+ *
+ * Audio: mainline dropped the EP93xx AC97 controller node along with
+ * sound/soc/cirrus/ep93xx-ac97.c and simone.c in Linux 5.9 (no DT support
+ * ever existed for it upstream), so the &soc override below re-adds it.
+ * Values cross-checked against the last pre-removal sources:
+ *  - reg: EP93XX_AAC_PHYS_BASE = EP93XX_APB_PHYS(0x80000) = 0x80880000,
+ *    size 0xac (arch/arm/mach-ep93xx/soc.h, core.c ep93xx_ac97_resources[]).
+ *    NB: 0x80820000 is the *I2S* controller, not AC97.
+ *  - interrupts: old IRQ_EP93XX_AACINTR = 6, which falls in vic0's range
+ *    (cf. dma0's IRQs 7-18 == old IRQ_EP93XX_DMAM2P0..DMAM2M1 under vic0).
+ *  - dmas: port 2 == EP93XX_DMA_AAC1 (drivers/dma/ep93xx_dma.c), used for
+ *    both tx and rx like the i2s node uses port 0 for both directions.
+ *  - pinctrl: ep93xx.dtsi's syscon node still carries ac97_default_pins
+ *    (function "ac97", group "ac97") even though the driver was removed;
+ *    selecting it clears SYSCON_DEVCFG_I2SONAC97 so the shared pins route
+ *    to AC97 instead of I2S.
+ */
+/dts-v1/;
+#include "ep93xx.dtsi"
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "cirrus,edb9301", "cirrus,ep9301";
+	model = "control4,speakerpoint";
+
+	chosen {
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0000000 0x800000>,
+		      <0x1000000 0x800000>,
+		      <0x4000000 0x800000>,
+		      <0x5000000 0x800000>;
+	};
+
+	/*
+	 * ASoC machine/card driver.  speakerpoint-card.ko (built into kernel)
+	 * matches this compatible string and registers the sound card.
+	 */
+	sound {
+		compatible = "control4,speakerpoint-audio";
+	};
+
+	/*
+	 * D241051QR (D2Audio/Renesas D2-41051) amp config bus. EP93xx has no
+	 * hardware I2C controller at all - confirmed via mach-ep93xx/core.c:
+	 * every EP93xx board bit-bangs I2C over the same two fixed GPIO pins
+	 * using the generic i2c-gpio driver (ep93xx_i2c_gpiod_table there
+	 * maps Port G1->index0(SDA), Port G0->index1(SCL), per i2c-gpio.c's
+	 * i2c_gpio_get_desc() index convention). gpio6 here is Port G: it's
+	 * the only node with just data+dir registers (no interrupt support)
+	 * whose position (7th of 8, 0-indexed 6) matches the alphabetical
+	 * A-H port ordering against the datasheet's interrupt-capable ports
+	 * (A, B, F only).
+	 */
+	i2c-d2audio {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio6 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio6 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+
+	/*
+	 * Front-panel LEDs. GPIO lines and active-low polarity recovered by
+	 * disassembling the stock pdriver.o (Research/Speakerpoint/mtd4_jffs2.bin):
+	 * p_driver_ioctl's "set X led on" handlers drive the GPIO bit LOW, "off"
+	 * drives it HIGH -> LEDs are active-low. Mapping (LED name from the
+	 * driver's own printk strings):
+	 *   data    = Port A bit 6  (gpio0 line 6)
+	 *   network = Port B bit 0  (gpio1 line 0)
+	 *   power   = Port B bit 1  (gpio1 line 1)
+	 *   ir      = Port B bit 2  (gpio1 line 2)
+	 * Stock p_driver_init drives power LOW and the rest HIGH, i.e. at boot
+	 * only power is lit - matching the desired "power on at boot" behaviour,
+	 * expressed here via power's default-on trigger.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-data {
+			label = "data";
+			gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+		};
+
+		led-network {
+			label = "network";
+			gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+		};
+
+		led-power {
+			label = "power";
+			gpios = <&gpio1 1 GPIO_ACTIVE_LOW>;
+			/* Lit at boot without needing a trigger Kconfig symbol;
+			 * the LED core applies this at registration. */
+			default-state = "on";
+		};
+
+		led-ir {
+			label = "ir";
+			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&ebi {
+	flash@60000000 {
+		compatible = "cfi-flash";
+		reg = <0x60000000 0x1000000>;
+		bank-width = <2>;
+		partitions {
+			compatible = "redboot-fis";
+			fis-index-block = <127>;
+		};
+	};
+};
+
+&eth0 {
+	phy-handle = <&phy0>;
+};
+
+&mdio0 {
+	phy0: ethernet-phy@1 {
+		reg = <1>;
+		device_type = "ethernet-phy";
+	};
+};
+
+&gpio3 {
+	status = "disabled";
+};
+
+&watchdog0 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+};
+
+/*
+ * Front-panel USB ports (OHCI host, EP9301 datasheet ch.12). Mainline's
+ * ep93xx.dtsi defines usb0 like ac97/watchdog0 above - present but
+ * status = "disabled" - so it has to be explicitly enabled here or the
+ * usb-ohci-hcd driver (built into the kernel) never gets a device to bind
+ * to and no USB port ever appears, regardless of kernel config. This was
+ * the actual cause of USB drives not being detected, not a userspace/mdev
+ * problem.
+ */
+&usb0 {
+	status = "okay";
+};
+
+&soc {
+	ac97: ac97@80880000 {
+		compatible = "cirrus,ep9301-ac97";
+		reg = <0x80880000 0xac>;
+		interrupt-parent = <&vic0>;
+		interrupts = <6>;
+		dmas = <&dma0 2 1>, <&dma0 2 2>;
+		dma-names = "tx", "rx";
+		pinctrl-names = "default";
+		pinctrl-0 = <&ac97_default_pins>;
+		#sound-dai-cells = <0>;
+	};
+};

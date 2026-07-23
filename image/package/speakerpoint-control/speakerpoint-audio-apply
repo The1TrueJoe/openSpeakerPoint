@@ -1,0 +1,179 @@
+#!/bin/sh
+#
+# speakerpoint-audio-apply - real hardware audio control for the SpeakerPoint.
+#
+# Two independent outputs share one PCM source (AC97 slots 3&4):
+#
+#   RCA line out : STAC9758 analog front DACs.
+#                  Controlled purely through ALSA (Master/Front/PCM).
+#
+#   Amp/speakers : STAC9758 S/PDIF transmitter -> D2-41051 (D2Audio) -> speaker
+#                  terminals. Requires the codec S/PDIF transmitter enabled and
+#                  its slot assignment pointed at the PCM slots (3&4), i.e.
+#                  IEC958 Playback Switch = on and AC97-SPSA = 0. The amp's own
+#                  level is the D2 master-volume register (0x000000) over I2C
+#                  bus 0, address 0x59 (0x800000 = 0dB, 0x000000 = full cut).
+#
+# Register facts confirmed from the D2-4 API spec (R32AN0004) and the STAC9752/3
+# AC97 2.3 datasheet; the amp boots firmware from internal ROM and defaults to
+# S/PDIF-selected input on this board.
+#
+# Usage:
+#   speakerpoint-audio-apply init                     one-time boot setup
+#   speakerpoint-audio-apply output off|rca|amp|both
+#   speakerpoint-audio-apply volume <0-100>           applied to active output(s)
+
+set -eu
+
+CARD=0
+I2C_BUS=0
+D2_ADDR=0x59
+
+have() { command -v "$1" >/dev/null 2>&1; }
+amix() { amixer -c "$CARD" "$@" >/dev/null 2>&1 || true; }
+
+# numid controls: 41 = IEC958 Playback Switch, 42 = IEC958 AC97-SPSA
+spdif_on()  { amix cset numid=41 on;  amix cset numid=42 0; }
+spdif_off() { amix cset numid=41 off; }
+
+# --- D2 amp (I2C) helpers ---------------------------------------------------
+# 24-bit register address + 24-bit data, MSB first on the wire.
+d2_write() { # d2_write AAAAAA DDDDDD  (6 hex chars each)
+	[ -c "/dev/i2c-${I2C_BUS}" ] || return 0
+	have i2ctransfer || return 0
+	a="$1"; d="$2"
+	i2ctransfer -y "$I2C_BUS" "w6@${D2_ADDR}" \
+		"0x$(echo "$a" | cut -c1-2)" "0x$(echo "$a" | cut -c3-4)" "0x$(echo "$a" | cut -c5-6)" \
+		"0x$(echo "$d" | cut -c1-2)" "0x$(echo "$d" | cut -c3-4)" "0x$(echo "$d" | cut -c5-6)" \
+		>/dev/null 2>&1 || true
+}
+
+# Map a 0-100 volume to the D2 signed-24-bit master-volume parameter.
+# 100 -> 0x800000 (0dB), 0 -> 0x000000 (full cut); otherwise -0.5dB per step
+# below 100 using the API's parameter = -2^23 * 10^(-atten/20).
+d2_vol_hex() {
+	v="$1"
+	if [ "$v" -le 0 ] 2>/dev/null; then echo "000000"; return; fi
+	if [ "$v" -ge 100 ] 2>/dev/null; then echo "800000"; return; fi
+	if have awk; then
+		awk -v v="$v" 'BEGIN{
+			atten=(100-v)*0.5;
+			p=-8388608*exp(-atten/20*log(10));
+			p=int(p+(p<0?-0.5:0.5));
+			if(p<0) p=16777216+p;
+			printf "%06x", p%16777216;
+		}'
+	else
+		echo "800000"
+	fi
+}
+
+d2_set_volume() { d2_write "000000" "$(d2_vol_hex "$1")"; }
+d2_mute()       { d2_write "000000" "000000"; }
+# Select S/PDIF as the D2 input (0xC00001); harmless if already set.
+d2_input_spdif(){ d2_write "020001" "c00001"; }
+
+# --- top-level actions ------------------------------------------------------
+do_init() {
+	# Common source: PCM must be audible for either output to carry sound.
+	amix sset PCM 100% unmute
+	# Make the amp listen to S/PDIF (matches the stock/boot default).
+	d2_input_spdif
+	# Leave everything silenced until an explicit output is chosen.
+	amix sset Master mute
+	amix sset Front mute
+	spdif_off
+	d2_mute
+}
+
+set_output() {
+	case "$1" in
+	off)
+		amix sset Master mute
+		amix sset Front mute
+		spdif_off
+		d2_mute
+		;;
+	rca)
+		amix sset PCM 100% unmute
+		amix sset Master unmute
+		amix sset Front unmute
+		spdif_off
+		d2_mute
+		;;
+	amp)
+		amix sset PCM 100% unmute
+		amix sset Master mute
+		amix sset Front mute
+		spdif_on
+		d2_input_spdif
+		;;
+	both)
+		amix sset PCM 100% unmute
+		amix sset Master unmute
+		amix sset Front unmute
+		spdif_on
+		d2_input_spdif
+		;;
+	*)
+		echo "output must be off|rca|amp|both" >&2
+		return 1
+		;;
+	esac
+}
+
+set_volume() {
+	v="$1"
+	# RCA path level (STAC analog Master + Front).
+	amix sset Master "${v}%"
+	amix sset Front "${v}%"
+	# Amp path level (D2 master volume); no-op unless the amp is enabled.
+	d2_set_volume "$v"
+}
+
+# --- test tones (speaker-test) ----------------------------------------------
+# Pink noise only, on the selected channel, through whatever output is
+# currently routed. speaker-test opens the ALSA device exclusively, so the
+# caller (the daemon) pauses mpg123 first.
+TONE_PIDFILE=/var/run/speakerpoint-tone.pid
+
+tone_stop() {
+	if [ -f "$TONE_PIDFILE" ]; then
+		kill "$(cat "$TONE_PIDFILE")" 2>/dev/null || true
+		rm -f "$TONE_PIDFILE"
+	fi
+	# belt and suspenders
+	killall speaker-test 2>/dev/null || true
+}
+
+tone_play() { # channel
+	have speaker-test || return 0
+	tone_stop
+	ch="${1:-both}"
+	case "$ch" in
+		left)  spk="-s1" ;;
+		right) spk="-s2" ;;
+		*)     spk="" ;;
+	esac
+	# Run in the background and self-terminate after ~4s so a tab close or a
+	# lost connection can never leave a tone stuck on.
+	(
+		speaker-test -D default -c2 -t pink $spk >/dev/null 2>&1 &
+		p=$!
+		echo "$p" > "$TONE_PIDFILE"
+		sleep 4
+		kill "$p" 2>/dev/null || true
+		rm -f "$TONE_PIDFILE"
+	) &
+}
+
+case "${1:-}" in
+	init)      do_init ;;
+	output)    set_output "${2:-}" ;;
+	volume)    set_volume "${2:-0}" ;;
+	tone)      tone_play "${2:-both}" ;;
+	tone-stop) tone_stop ;;
+	*)         echo "usage: $0 {init|output ...|volume 0-100|tone ch|tone-stop}" >&2; exit 1 ;;
+esac
+
+exit 0

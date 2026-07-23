@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeakerPoint firmware
+Date: Wed, 22 Jul 2026 00:00:00 -0000
+Subject: [PATCH] Skip building libi2c.so; link tools against the static lib
+
+SOCFLAGS hardcoded lowercase -fpic (GCC's "small" PIC model) for
+building lib/libi2c.so. Buildroot passes "-z text" whenever building
+for musl with shared libs (musl's dynamic loader crashes at runtime on
+DT_TEXTREL, so this is deliberately a build-time hard error rather
+than a later runtime crash - see package/Makefile.in), and the link
+failed outright:
+
+  read-only segment has dynamic relocations
+
+Switching to -fPIC (uppercase, "large" PIC model) did not fix it
+either: EP93xx/ARM920T is ARMv4t with no Thumb-2 and no MOVW/MOVT, and
+plain -fPIC still can't produce a relocation-free .so for this ISA.
+
+Nothing else on the system links against libi2c dynamically - it's
+i2c-tools' own internal implementation detail - so just skip building
+the shared library entirely and link the CLI tools against the static
+.a instead (tools/Module.mk already supports this via USE_STATIC_LIB).
+`override` is needed because Buildroot passes BUILD_STATIC_LIB=0 on
+the make command line for BR2_SHARED_LIBS builds, which would
+otherwise beat a plain in-Makefile assignment.
+
+--- a/Makefile
++++ b/Makefile
+@@ -32,12 +32,25 @@
+ # When debugging, use the following instead
+ #CFLAGS		:= -O -g
+ CFLAGS		+= -Wall
+-SOCFLAGS	:= -fpic -D_REENTRANT $(CFLAGS)
++SOCFLAGS	:= -fPIC -D_REENTRANT $(CFLAGS)
+
+ BUILD_DYNAMIC_LIB ?= 1
+ BUILD_STATIC_LIB ?= 1
+ USE_STATIC_LIB ?= 0
+
++# EP93xx/ARM920T (ARMv4t, no Thumb-2/MOVW-MOVT) cannot produce a
++# relocation-free libi2c.so even with -fPIC - musl's dynamic loader
++# doesn't support the resulting DT_TEXTREL, so Buildroot's musl+shared
++# libs build passes -z text and hard-fails at link time rather than
++# risk a runtime crash. Nothing else on the system links against
++# libi2c dynamically, so just skip building the .so and link the
++# tools against the static .a instead. override beats the
++# BUILD_STATIC_LIB=0 Buildroot passes on the make command line for
++# BR2_SHARED_LIBS builds.
++override BUILD_DYNAMIC_LIB := 0
++override BUILD_STATIC_LIB := 1
++override USE_STATIC_LIB := 1
++
+ ifeq ($(USE_STATIC_LIB),1)
+ BUILD_STATIC_LIB := 1
+ endif

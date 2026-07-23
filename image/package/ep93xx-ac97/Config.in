@@ -1,0 +1,14 @@
+config BR2_PACKAGE_EP93XX_AC97
+	bool "ep93xx-ac97"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Out-of-tree kernel modules providing:
+	    ep93xx-ac97.ko     - EP93xx AC97 controller ASoC CPU DAI driver
+	                         (ported from the v5.8 in-tree driver that was
+	                         removed when its board users were deleted).
+	    speakerpoint-card.ko - ASoC machine/card driver wiring the EP93xx
+	                         AC97 controller to the STAC9758 codec on the
+	                         Control4 SpeakerPoint PCB.
+
+	  Requires CONFIG_MODULES=y and CONFIG_SND_SOC_AC97_CODEC=y in the
+	  kernel configuration.

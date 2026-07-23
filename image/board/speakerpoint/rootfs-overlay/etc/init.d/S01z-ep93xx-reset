@@ -1,0 +1,40 @@
+#!/bin/sh
+# EP93xx hardware reset via watchdog timer.
+#
+# The ep93xx_wdt driver has no of_match_table and does not probe from DT, so
+# no restart handler is registered in modern DT-only EP93xx kernels.
+# reboot(2) therefore always halts instead of resetting.
+#
+# Buildroot's BusyBox-init /etc/init.d/rcK (package/initscripts/init.d/rcK)
+# has no separate "K-script" concept - it only globs /etc/init.d/S??* and
+# calls each with "stop", via `ls -r` (reverse/descending order). A script
+# literally named K99z-... (the classic SysVinit convention this used to
+# follow) is invisible to that glob and never runs at all. Renamed to
+# S01z-ep93xx-reset instead: rcS runs S-scripts ascending (so this being
+# S01 doesn't matter at boot, "start" is a no-op below anyway), and rcK
+# runs them descending, so the *lowest* number - not the highest - is what
+# actually executes last, after every other S##name service has stopped.
+# Writing 0xaaaa to the watchdog register (0x80940000) arms a 250 ms
+# hardware timer that fires from the independent 508 Hz oscillator — even
+# after the CPU is halted.  No SWLock is required for the WDT register.
+#
+# Source: drivers/watchdog/ep93xx_wdt.c
+#   ep93xx_wdt_start(): writel(0xaaaa, base + EP93XX_WATCHDOG)
+#   EP93XX_WATCHDOG = 0x00  →  physical 0x80940000 + 0 = 0x80940000
+
+case "$1" in
+stop)
+    sync
+    if command -v devmem > /dev/null 2>&1; then
+        devmem 0x80940000 32 0xaaaa
+    fi
+    ;;
+start|restart)
+    ;;
+*)
+    echo "Usage: $0 {start|stop|restart}" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

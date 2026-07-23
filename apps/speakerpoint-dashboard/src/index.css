@@ -1,0 +1,44 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-base-950 text-slate-200 antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 85% -10%, rgba(249, 115, 22, 0.14), transparent 60%),
+      radial-gradient(50rem 30rem at -10% 110%, rgba(52, 211, 153, 0.08), transparent 55%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-white/5 bg-base-850/70 p-5 shadow-panel backdrop-blur-sm;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium;
+  }
+}
+
+/* Range slider styling shared by volume + seek */
+input[type="range"].slider {
+  @apply h-1.5 w-full cursor-pointer appearance-none rounded-full bg-base-700;
+}
+input[type="range"].slider::-webkit-slider-thumb {
+  @apply h-4 w-4 appearance-none rounded-full bg-accent shadow-glow transition-transform;
+}
+input[type="range"].slider::-webkit-slider-thumb:active {
+  transform: scale(1.2);
+}
+input[type="range"].slider::-moz-range-thumb {
+  @apply h-4 w-4 rounded-full border-0 bg-accent;
+}
+input[type="range"].slider:disabled {
+  @apply cursor-not-allowed opacity-40;
+}

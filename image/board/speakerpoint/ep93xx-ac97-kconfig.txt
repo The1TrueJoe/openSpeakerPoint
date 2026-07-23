@@ -1,0 +1,17 @@
+
+config SND_EP93XX_SOC_AC97
+	bool "EP93xx AC97 controller support"
+	depends on SND_EP93XX_SOC
+	select AC97_BUS
+	select SND_AC97_CODEC
+	select SND_SOC_AC97_CODEC
+	help
+	  EP93xx AC97 audio controller CPU DAI (ported from mainline v5.8).
+
+config SND_SOC_SPEAKERPOINT
+	bool "Control4 SpeakerPoint ASoC machine driver"
+	depends on SND_EP93XX_SOC_AC97
+	help
+	  ASoC machine driver for the Control4 SpeakerPoint.
+	  Signal path: EP93xx AC97 -> STAC9758 codec -> D241051QR amp -> speakers.
+

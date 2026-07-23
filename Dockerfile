@@ -1,9 +1,4 @@
-# syntax=docker/dockerfile:1.7
-
 # Buildroot build container.
-#
-# Provides a reproducible build environment and builds firmware during
-# `docker build`, then exports only final images.
 #
 # Usage (from repo root):
 #   docker build --target artifacts --output type=local,dest=./output .
@@ -13,6 +8,8 @@ ARG BUILDROOT_REPO=https://github.com/buildroot/buildroot
 ARG BUILDROOT_REF=master
 ARG BR2_JLEVEL=
 ARG TOPLEVEL_JOBS=
+ARG BUILD_TARGETS=all
+ARG FORCE_CLEAN=
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -39,6 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cvs \
         subversion \
         mercurial \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch "$BUILDROOT_REF" "$BUILDROOT_REPO" /opt/buildroot
@@ -56,7 +55,7 @@ COPY --chown=builder:builder . /src
 
 RUN --mount=type=cache,target=/src/dl,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/output,uid=1000,gid=1000 \
-    BR2_JLEVEL="$BR2_JLEVEL" TOPLEVEL_JOBS="$TOPLEVEL_JOBS" bash ./build.sh \
+    BR2_JLEVEL="$BR2_JLEVEL" TOPLEVEL_JOBS="$TOPLEVEL_JOBS" FORCE_CLEAN="$FORCE_CLEAN" bash ./build.sh $BUILD_TARGETS \
     && rm -rf /tmp/artifacts \
     && mkdir -p /tmp/artifacts \
     && cp -a /src/output/images/. /tmp/artifacts/

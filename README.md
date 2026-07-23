@@ -1,33 +1,25 @@
-# control4-speakerpoint-modern
-Giving the 2006 Control4 Speakerpoint a new life
+# Control4 Speakerpoint Firmware Rewrite
 
-Custom Linux firmware for the Control4 SpeakerPoint (Cirrus EP9301 / EDB9301
-reference design), replacing the stock 2.4.21 kernel + cramfs userland while
-keeping the stock RedBoot bootloader untouched. See
-[docs/hardware.md](docs/hardware.md) for hardware facts, the boot mechanism,
-and the TFTP netboot workflow, and `/memories/session/plan.md` for the full
-phased project plan.
+Custom Linux firmware for the Control4 SpeakerPoint (Cirrus EP9301), 
+replacing the stock 2.4.21 kernel + cramfs userland while
+keeping the stock RedBoot bootloader untouched. 
 
-## Status: Phase 1 (minimal SSH shell + app framework scaffolding)
+This is a work in progress. All features may not be fully functional.
 
-## Layout
-- `br-external/` - Buildroot external tree (`BR2_EXTERNAL`): board defconfig,
-  kernel config fragment, device tree, rootfs overlay/post-build hook, and
-  custom app packages (`br-external/package/`).
-- `apps/` - source for custom SpeakerPoint applications, built by the
-  cross-toolchain and wired into the image via `br-external/package/`. See
-  [apps/README.md](apps/README.md) for how to add a new one.
-- `build.sh` - single reproducible entry point used locally, in Docker, and
-  in CI.
-- `Dockerfile` - containerized builder that clones Buildroot into the image,
-  so firmware builds can run entirely in Docker.
-- `.github/workflows/build.yml` - GitHub Actions CI: builds the image on
-  every push/PR touching build-relevant paths and uploads the resulting
-  images as an artifact.
-- `tftp-serve.py` - read-only TFTP server for netbooting a
-  freshly built image straight into RAM via RedBoot, with zero flash writes.
-- `docs/hardware.md` - hardware facts, MTD layout, RedBoot boot script, TFTP
-  netboot commands, and the recovery procedure.
+## Current Implemented Features
+
+- SSH access
+- React Web UI
+- Speaker and RCA Audio test tones
+- USB Playback
+- USB Media Detection and Hotplug
+
+## Planned Features
+
+(If I can get around to it)
+
+- Airplay 1
+- Spotify Connect
 
 ## Building
 
@@ -35,54 +27,66 @@ phased project plan.
 git clone <this repo>
 cd control4-speakerpoint-modern
 docker build --target artifacts --output type=local,dest=./output .
-
-# optional: push harder on CPU parallelism (example values)
-docker build \
-  --build-arg BR2_JLEVEL=6 \
-  --target artifacts --output type=local,dest=./output .
-
-# optional: add top-level parallelism too (faster, but more RAM-hungry)
-docker build \
-  --build-arg BR2_JLEVEL=6 \
-  --build-arg TOPLEVEL_JOBS=4 \
-  --target artifacts --output type=local,dest=./output .
 ```
 
 This builds everything inside Docker and exports final images to `output/images`
-with no runtime bind-mounted build flow.
 
-Speed notes:
-- The Dockerfile now uses BuildKit cache mounts for `dl/` and `output/`, so
-  repeat builds on the same machine are much faster.
-- `build.sh` now auto-tunes `BR2_JLEVEL` from available CPU and RAM when you do
-  not set it explicitly.
-- `BR2_JLEVEL` controls per-package parallel jobs (recommended primary knob).
-- `TOPLEVEL_JOBS` enables Buildroot top-level parallelization (`make -j`), which
-  is faster but still considered experimental by Buildroot and uses more memory.
-- If you are on Docker Desktop, increasing allocated CPUs/RAM in settings has a
-  big impact on first-build time.
+The image build path compiles custom apps (including `speakerpoint-control`)
+as part of normal Buildroot package compilation.
+
+## Debug Connection
+
+The main console connection to the speakerpoint is an RS232 (not standard UART) header near the Cirrus EP9301 and right next to the MA3221C. Pin 1 is RX, pin 2 is GND, and pin 3 is TX. The baudrate is 57600.
+
+![Header Location](docs/rs232.png)
 
 ## Testing a build (recommended: TFTP netboot, no flash writes)
+
+After building the image, run this command on your machine to open a TFTP server for the image.
 
 ```sh
 python3 -m pip install -r requirements.txt
 sudo ./tftp-serve.py output/images
 ```
 
-Then, at the RedBoot prompt (`^C` during the 1 second boot delay), `load` +
-`exec` the kernel (and optionally the initramfs) straight into RAM - see
-"TFTP netboot" in [docs/hardware.md](docs/hardware.md) for the exact
-commands. This is the fastest way to iterate: nothing is written to flash,
-so there's no way to brick the board this way.
+Connect the RS232 adapter as shown above and set baud to 57600. If the device is powered on already, you can press enter to start the login prompt. The credentials for Control4's stock firmware are:
 
-Once an image is verified good over netboot, RedBoot's `fis create` commands
-persist it to flash permanently - also documented in
-[docs/hardware.md](docs/hardware.md). If something ever fails to boot after
-flashing, see "Recovery path" there.
+```sh
+root
+t0talc0ntr0l4!
+```
 
-## CI
+Then, once you are into the console, enter the ```reboot``` command. You can also do a standard power-cycle.
 
-Pushes/PRs touching `br-external/`, `apps/`, `build.sh`, or `Dockerfile`
-trigger a GitHub Actions build (`.github/workflows/build.yml`) that builds in
-Docker and exports `output/images/*` as a build artifact. The first build is
-still slow because it includes a full Buildroot toolchain build.
+RedBoot will send a ```+``` to the console and you will have a 1 second to press ```Control-C``` to interrupt the bootloader. Once you see the ```RedBoot>``` prompt, you will then enter the following commands:
+
+```sh
+ip_address -l 10.0.0.250 -h 10.0.0.105
+load -r -v -b 0x00800000 zImage.ep93xx-speakerpoint
+load -r -v -b 0x01000000 rootfs.cpio.gz
+exec -b 0x00800000 -l 0x1c8e60 -c "console=ttyAM0,57600" -r 0x01000000 -s 0x36a7df
+```
+
+Where ```10.0.0.250``` is an unused IP on your subnet and ```10.0.0.105``` is the IP of the TFTP server. 
+
+After running each ```load``` command you will get an output like: ```Raw file loaded 0x01000000-0x0135893a, assumed entry at 0x01000000```. 
+You need to save the second number as that is the end address of the loaded file. For the ```exec``` command you need to input the size of each image
+which you can calulate by subtracting the start addresses which is ```0x00800000``` or ```0x01000000``` from the end address of the image and add one.
+For example:
+
+```0x009c8e59 - 0x00800000 + 1 = 0x1c8e60``` and ```0x0136a7de - 0x01000000 + 1 = 0x36a7df```
+
+Then you fill those numbers after ```-l``` and ```-s``` in the ```exec``` command respectively.
+
+Run the command and it will boot.
+
+The credentials for this image are:
+
+```sh
+root
+speakerpoint
+```
+
+## Disclaimer
+
+This is not endorsed or authroized by Control4 Corporation. Control4 is a trademark of the Control4 Corporation. 

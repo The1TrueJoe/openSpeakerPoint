@@ -1,0 +1,3 @@
+# Custom app packages live under package/<name>/ - see apps/README.md.
+source "$BR2_EXTERNAL_SPEAKERPOINT_PATH/package/speakerpoint-control/Config.in"
+source "$BR2_EXTERNAL_SPEAKERPOINT_PATH/package/ep93xx-ac97/Config.in"
