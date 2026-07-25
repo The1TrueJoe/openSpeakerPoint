@@ -1,2 +1,2 @@
-# Enable devmem for K99z-ep93xx-reset SYSCON reboot
+# Enable devmem for S01z-ep93xx-reset's SYSCON reboot
 CONFIG_DEVMEM=y

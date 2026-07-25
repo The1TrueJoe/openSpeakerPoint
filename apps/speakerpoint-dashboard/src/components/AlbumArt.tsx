@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Disc3 } from "lucide-react";
+import { Disc3, type LucideIcon } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -8,9 +8,10 @@ interface AlbumArtProps {
   hasArt: boolean;
   className?: string;
   spinning?: boolean;
+  placeholderIcon?: LucideIcon;
 }
 
-export function AlbumArt({ file, hasArt, className, spinning }: AlbumArtProps) {
+export function AlbumArt({ file, hasArt, className, spinning, placeholderIcon: Icon = Disc3 }: AlbumArtProps) {
   const [failed, setFailed] = useState(false);
   const url = hasArt && !failed ? api.albumArtUrl(file) : null;
 
@@ -33,7 +34,7 @@ export function AlbumArt({ file, hasArt, className, spinning }: AlbumArtProps) {
         />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-base-600">
-          <Disc3 className={cn("h-1/2 w-1/2", spinning && "animate-spin [animation-duration:6s]")} />
+          <Icon className={cn("h-1/2 w-1/2", spinning && "animate-spin [animation-duration:6s]")} />
         </div>
       )}
     </div>

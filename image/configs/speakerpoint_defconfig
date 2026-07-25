@@ -5,8 +5,8 @@ BR2_arm920t=y
 # the audio path is not CPU-bound enough to miss -O2.
 BR2_OPTIMIZE_S=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
-# No C++ in the image: the media engine is mpg123 (pure C), not mpd, so we
-# avoid pulling in libstdc++/libfmt - a large RAM saving on the initramfs.
+# C++ is needed by shairport-sync (AirPlay) and MPD (media playback).
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
 # Dynamic linking (musl's shared libs are lightweight, unlike glibc's) so
 # every binary shares one copy of libc/alsa-lib/ncurses/etc. instead of each
 # statically duplicating them - the actual fix for multi-binary bloat like
@@ -40,9 +40,19 @@ BR2_LINUX_KERNEL_INTREE_DTS_NAME="cirrus/ep93xx-speakerpoint"
 BR2_PACKAGE_MTD=y
 BR2_PACKAGE_BUSYBOX_HTTPD=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/busybox.fragment"
+# Client tools (dbclient/ssh) default to on but are never invoked on-device -
+# this box is only ever an SSH server, never a client. scp/dropbearkey are
+# always built server-side regardless of this setting.
 BR2_PACKAGE_DROPBEAR=y
+# BR2_PACKAGE_DROPBEAR_CLIENT is not set
 BR2_PACKAGE_SPEAKERPOINT_CONTROL=y
 BR2_PACKAGE_EP93XX_AC97=y
+# Reverted a trimmed PCM_PLUGINS list back to Buildroot's default ("all"):
+# it was an unverified-on-hardware size cut, and a hardware regression
+# report ("audio output isn't working") landed before it was ever confirmed
+# safe. Reintroduce a narrower list later only alongside an actual
+# passing re-test of every audio path (RCA/amp/line-in/AirPlay).
+BR2_PACKAGE_ALSA_LIB=y
 # alsa-utils for testing the AC97/STAC9758 audio path: amixer to unmute/set
 # Master Out (AC97 codecs power up muted), aplay for real playback, and
 # speaker-test for a quick tone without needing a test file on target.
@@ -50,6 +60,11 @@ BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# alsaloop: captures the STAC line-in ADC and plays it back through the normal
+# output path, so external line-in audio can be routed to the RCA out and/or
+# the powered amp (the amp is fed from the playback S/PDIF, so line-in has to
+# go capture -> playback to reach it).
+BR2_PACKAGE_ALSA_UTILS_ALSALOOP=y
 # alsamixer defaults to y and pulls in ncurses for its interactive TUI, which
 # this headless board (serial console + network only, no local display) has
 # no use for; amixer already covers scripted mixer control non-interactively.
@@ -63,11 +78,23 @@ BR2_PACKAGE_I2C_TOOLS=y
 # Dynamic /dev + hotplug via BusyBox mdev, so an inserted USB drive gets a
 # device node and fires our automount rule (see mdev.conf in the overlay).
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
-# mpg123: the media engine. A small pure-C MP3 player; the control daemon
-# drives it in remote-control mode (-R) for play/pause/seek/position and
-# parses ID3 tags + embedded album art itself. MP3-only, chosen over mpd to
-# keep the netbooted initramfs small.
-BR2_PACKAGE_MPG123=y
+# MPD: the media engine. Replaced a hand-rolled mpg123 -R wrapper that never
+# gave reliable pause/seek/queue - MPD is a real player daemon with a proper
+# control protocol and syslog logging, so failures are visible instead of
+# silently doing nothing. Deliberately minimal: MP3 (libmad) + ID3 tags only,
+# no FLAC/Vorbis/ffmpeg/curl/network-input, which keeps it to ~2MB. C++ is
+# already enabled for shairport-sync, so MPD adds no new toolchain cost.
+BR2_PACKAGE_MPD=y
+BR2_PACKAGE_MPD_ALSA=y
+BR2_PACKAGE_MPD_TCP=y
+BR2_PACKAGE_MPD_MAD=y
+BR2_PACKAGE_MPD_ID3TAG=y
+# shairport-sync: AirPlay 1 receiver. Uses its bundled tinysvcmdns for
+# discovery (no Avahi/D-Bus) and mbedTLS (lighter than OpenSSL) for the RAOP
+# crypto. The codec is exclusive (no software mixer), so an incoming AirPlay
+# stream makes the daemon stop MPD and hand the device over.
+BR2_PACKAGE_MBEDTLS=y
+BR2_PACKAGE_SHAIRPORT_SYNC=y
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 # BR2_TARGET_ROOTFS_TAR is not set

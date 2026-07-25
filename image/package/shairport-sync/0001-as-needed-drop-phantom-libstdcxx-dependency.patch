@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeakerPoint firmware
+Date: Fri, 24 Jul 2026 00:00:00 -0000
+Subject: [PATCH] Drop the phantom libstdc++ NEEDED entry via --as-needed
+
+With our build options (no --with-convolution, no --with-apple-alac),
+shairport-sync compiles zero C++ object files - apple_alac.cpp and
+FFTConvolver/*.cpp are gated behind AM_CONDITIONALs that are false
+here. Automake still decides the target's link driver by scanning all
+sources textually referenced in *_SOURCES across the whole file,
+conditionals or not, so it emits shairport_sync_LINK = $(CXXLINK)
+regardless. g++ unconditionally adds -lstdc++, giving the binary a
+real (per readelf -d) but entirely unused NEEDED entry, which is what
+stops it from being pruned even though nothing calls into it.
+
+--as-needed drops any NEEDED entry a binary doesn't actually
+reference a symbol from - the standard fix for exactly this.
+
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -9,6 +9,8 @@ noinst_HEADERS =
+
+ bin_PROGRAMS = shairport-sync
+
++AM_LDFLAGS = -Wl,--as-needed
++
+ BUILT_SOURCES =
+ noinst_HEADERS =
+ CLEANFILES =

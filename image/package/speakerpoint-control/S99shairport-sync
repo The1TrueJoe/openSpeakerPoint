@@ -1,0 +1,32 @@
+#!/bin/sh
+# Overrides Buildroot's stock S99shairport-sync, which passes -d (self-
+# daemonize via libdaemon) - we don't select libdaemon, so start-stop-daemon
+# backgrounds it externally instead.
+
+DAEMON=/usr/bin/shairport-sync
+PIDFILE=/var/run/shairport-sync/shairport-sync.pid
+
+case "$1" in
+start)
+	printf 'Starting shairport-sync: '
+	mkdir -p /var/run/shairport-sync
+	start-stop-daemon -S -q -m -b -p "$PIDFILE" -x "$DAEMON"
+	echo "OK"
+	;;
+stop)
+	printf 'Stopping shairport-sync: '
+	start-stop-daemon -K -q -p "$PIDFILE"
+	echo "OK"
+	;;
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac
+
+exit 0

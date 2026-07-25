@@ -5,4 +5,4 @@ config BR2_PACKAGE_SPEAKERPOINT_CONTROL
 	  endpoints for volume, output routing (RCA line-out vs. the
 	  powered D2 amplifier), test tones, and USB MP3 playback with
 	  ID3 metadata + album art. Drives the codec via ALSA, the amp
-	  over I2C, and plays media through an mpg123 -R child.
+	  over I2C, and plays media via MPD.

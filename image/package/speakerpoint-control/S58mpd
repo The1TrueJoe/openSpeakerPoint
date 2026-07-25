@@ -1,0 +1,38 @@
+#!/bin/sh
+# Start MPD before speakerpoint-control (S61) so the control API can reach it
+# straight away. Runtime dirs are recreated here because they live on tmpfs.
+
+DAEMON=/usr/bin/mpd
+CONF=/etc/mpd.conf
+
+case "$1" in
+start)
+	[ -x "$DAEMON" ] || exit 0
+	printf 'Starting mpd: '
+	mkdir -p /tmp/mpd/playlists /media/usb
+	# Mount a drive that was already inserted at boot, so the first scan
+	# sees it (hotplug is handled later by usb-detect/mdev).
+	for p in /dev/sd[a-z][0-9]*; do
+		[ -b "$p" ] || continue
+		mountpoint -q /media/usb 2>/dev/null && break
+		mount -t auto -o ro,noatime "$p" /media/usb 2>/dev/null && break
+	done
+	if "$DAEMON" "$CONF"; then echo "OK"; else echo "FAIL"; fi
+	;;
+stop)
+	printf 'Stopping mpd: '
+	"$DAEMON" --kill "$CONF" >/dev/null 2>&1
+	echo "OK"
+	;;
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac
+
+exit 0

@@ -1,25 +1,29 @@
 /*
  * speakerpoint-control - HTTP control daemon for the SpeakerPoint.
  *
- * Exposes audio routing/volume/test-tones and (via an mpg123 -R child) USB
- * MP3 playback with ID3 metadata and album art, over a small JSON API consumed
- * by the React dashboard.
+ * Exposes audio routing/volume/test-tones and (via MPD) USB MP3 playback
+ * with metadata and album art, over a small JSON API consumed by the React
+ * dashboard.
  *
  *   GET  /api/health
- *   GET  /api/state                         { volume, output }
+ *   GET  /api/state                         { volume, output, source }
  *   POST /api/output?value=off|rca|amp|both
+ *   POST /api/source?value=media|linein
  *   POST /api/volume?value=0-100
  *   POST /api/tone?channel=&type=&freq=
  *   POST /api/tone/stop
- *   GET  /api/now                           now-playing
+ *   GET  /api/now                           now-playing (media/airplay/linein)
  *   POST /api/transport?cmd=play|pause|stop|next|prev
  *   POST /api/seek?value=<seconds>
  *   GET  /api/library                       USB media library
  *   POST /api/play?index=<n>
  *   POST /api/rescan
+ *   POST /api/delete?file=<path>
+ *   POST /api/upload?name=<f>               raw-body MP3 upload to USB
  *   GET  /api/albumart?file=<uri>           image bytes
  */
 #include "audio.h"
+#include "airplay.h"
 #include "httpio.h"
 #include "player.h"
 
@@ -50,6 +54,138 @@ static int is(const http_request_t *r, const char *method, const char *path)
     return !strcmp(r->method, method) && !strcmp(r->path, path);
 }
 
+#define UPLOAD_DIR "/media/usb"
+#define MAX_UPLOAD (128UL * 1024 * 1024)
+
+/* Reduce a client-supplied name to a safe basename in out; 0 on success. */
+static int safe_name(const char *in, char *out, size_t out_len)
+{
+    const char *slash = strrchr(in, '/');
+    const char *base = slash ? slash + 1 : in;
+    if (base[0] == '\0' || base[0] == '.' || strstr(base, "..")) return -1;
+    size_t n = 0;
+    for (const char *p = base; *p && n + 1 < out_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == '/' || c == '\\') return -1;
+        out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    return n ? 0 : -1;
+}
+
+static long parse_content_length(const char *raw)
+{
+    const char *h = strcasestr(raw, "\r\ncontent-length:");
+    if (!h) return -1;
+    h += strlen("\r\ncontent-length:");
+    while (*h == ' ') h++;
+    return atol(h);
+}
+
+/* Read from fd into buf (capacity cap-1) until "\r\n\r\n" is seen (the full
+ * header block, which a single recv() is not guaranteed to contain - it can
+ * legitimately split across TCP segments, especially when a large body
+ * follows). Returns total bytes read (headers plus any body bytes that
+ * happened to arrive alongside them), or -1 if the header block never
+ * completes within cap or the peer closes first. */
+static ssize_t recv_headers(int fd, char *buf, size_t cap)
+{
+    size_t total = 0;
+    while (total < cap - 1) {
+        ssize_t n = recv(fd, buf + total, cap - 1 - total, 0);
+        if (n <= 0) return -1;
+        total += (size_t)n;
+        buf[total] = '\0';
+        if (memmem(buf, total, "\r\n\r\n", 4)) return (ssize_t)total;
+    }
+    return -1;
+}
+
+/* Stream a raw-body file upload (POST /api/upload?name=foo.mp3) onto the USB
+ * drive, briefly remounting it read-write so normal playback stays read-only
+ * and yank-safe. */
+static void handle_upload(int fd, const http_request_t *r, char *raw, ssize_t nread)
+{
+    char rawname[256], name[128], path[300], tmp_path[300];
+    if (http_query(r->query, "name", rawname, sizeof(rawname)) ||
+        safe_name(rawname, name, sizeof(name))) {
+        http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad name\"}");
+        return;
+    }
+
+    long clen = parse_content_length(raw);
+    char *body = strstr(raw, "\r\n\r\n");
+    if (clen < 0 || (unsigned long)clen > MAX_UPLOAD || !body) {
+        http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad body\"}");
+        return;
+    }
+    body += 4;
+    size_t have = (size_t)(nread - (body - raw));
+
+    (void)system("mount -o remount,rw " UPLOAD_DIR " 2>/dev/null");
+
+    /* Write to a temp file and rename into place only on success, so a
+     * failed or interrupted transfer can never leave a truncated track
+     * sitting in the library. */
+    snprintf(path, sizeof(path), "%s/%s", UPLOAD_DIR, name);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/.upload.part", UPLOAD_DIR);
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) {
+        (void)system("mount -o remount,ro " UPLOAD_DIR " 2>/dev/null");
+        http_send_json(fd, 500, "Error", "{\"ok\":false,\"error\":\"no writable drive\"}");
+        return;
+    }
+
+    int failed = 0;
+    size_t written = 0, since_sync = 0;
+
+    /* 32KB writes, flushed every 256KB. The EP93xx OHCI is full-speed only,
+     * and letting the page cache accumulate a large dirty window makes the
+     * block layer issue oversized requests that the link can't complete in
+     * time (SCSI reports "Unaligned partial completion" and the write
+     * fails). Pacing the writes keeps each request small. */
+    if (have) {
+        size_t w = have > (size_t)clen ? (size_t)clen : have;
+        if (fwrite(body, 1, w, f) != w) failed = 1;
+        written = w;
+        since_sync = w;
+    }
+
+    char buf[32768];
+    while (!failed && written < (size_t)clen) {
+        size_t want = (size_t)clen - written;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        ssize_t n = recv(fd, buf, want, 0);
+        if (n <= 0) break;
+        if (fwrite(buf, 1, (size_t)n, f) != (size_t)n) { failed = 1; break; }
+        written += (size_t)n;
+        since_sync += (size_t)n;
+        if (since_sync >= 256 * 1024) {
+            if (fflush(f) != 0) { failed = 1; break; }
+            fsync(fileno(f));
+            since_sync = 0;
+        }
+    }
+
+    if (fflush(f) != 0) failed = 1;
+    if (fsync(fileno(f)) != 0) failed = 1;
+    if (fclose(f) != 0) failed = 1;
+
+    if (!failed && written == (size_t)clen && rename(tmp_path, path) == 0) {
+        (void)system("sync; mount -o remount,ro " UPLOAD_DIR " 2>/dev/null");
+        /* The drive never went anywhere - just invalidate the cached
+         * listing, don't re-enumerate USB (see player_invalidate_library). */
+        player_invalidate_library();
+        http_send_json(fd, 200, "OK", "{\"ok\":true}");
+    } else {
+        unlink(tmp_path);
+        (void)system("sync; mount -o remount,ro " UPLOAD_DIR " 2>/dev/null");
+        http_send_json(fd, 500, "Error",
+                       "{\"ok\":false,\"error\":\"write failed - drive may be full or faulty\"}");
+    }
+}
+
 static void dispatch(int fd, const http_request_t *r)
 {
     char val[512];
@@ -68,6 +204,16 @@ static void dispatch(int fd, const http_request_t *r)
         char body[128];
         audio_state_json(body, sizeof(body));
         http_send_json(fd, 200, "OK", body);
+        return;
+    }
+
+    /* Actual hardware readback (mixer + AC97 + D2 amp registers), so a
+     * mismatch between what we asked for and what the chips have is
+     * directly visible instead of having to be inferred. */
+    if (is(r, "GET", "/api/audio/status")) {
+        char body[2048];
+        audio_status_text(body, sizeof(body));
+        http_send_binary(fd, "text/plain", body, strlen(body));
         return;
     }
 
@@ -95,6 +241,18 @@ static void dispatch(int fd, const http_request_t *r)
         return;
     }
 
+    if (is(r, "POST", "/api/source")) {
+        if (http_query(r->query, "value", val, sizeof(val)) || !audio_valid_source(val)) {
+            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad source\"}");
+            return;
+        }
+        audio_set_source(val);
+        char body[160];
+        audio_state_json(body, sizeof(body));
+        http_send_json(fd, 200, "OK", body);
+        return;
+    }
+
     if (is(r, "POST", "/api/tone")) {
         char ch[16] = "both";
         http_query(r->query, "channel", ch, sizeof(ch));
@@ -111,7 +269,16 @@ static void dispatch(int fd, const http_request_t *r)
 
     if (is(r, "GET", "/api/now")) {
         char body[2048];
-        player_now_json(body, sizeof(body));
+        if (airplay_active()) {
+            airplay_now_json(body, sizeof(body));
+        } else if (!strcmp(audio_source(), "linein")) {
+            snprintf(body, sizeof(body),
+                     "{\"source\":\"linein\",\"state\":\"play\",\"file\":null,"
+                     "\"title\":null,\"artist\":null,\"album\":null,\"elapsed\":0,"
+                     "\"duration\":0,\"hasArt\":false}");
+        } else {
+            player_now_json(body, sizeof(body));
+        }
         http_send_json(fd, 200, "OK", body);
         return;
     }
@@ -162,6 +329,15 @@ static void dispatch(int fd, const http_request_t *r)
         return;
     }
 
+    if (is(r, "POST", "/api/delete")) {
+        if (http_query(r->query, "file", val, sizeof(val)) || player_delete_track(val)) {
+            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"delete failed\"}");
+            return;
+        }
+        http_send_json(fd, 200, "OK", "{\"ok\":true}");
+        return;
+    }
+
     if (is(r, "GET", "/api/albumart")) {
         if (http_query(r->query, "file", val, sizeof(val))) {
             http_send_empty(fd, 400, "Bad Request");
@@ -194,6 +370,7 @@ int main(void)
     audio_load();
     audio_apply_startup();
     player_start();
+    airplay_start();
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -228,18 +405,22 @@ int main(void)
         FD_SET(server_fd, &rfds);
         int maxfd = server_fd;
 
-        /* Also watch mpg123's status pipe so playback position/state stay
-         * current between HTTP requests. */
+        /* Optional media-engine fd, if it has one to watch. */
         int pfd = player_status_fd();
         if (pfd >= 0) {
             FD_SET(pfd, &rfds);
             if (pfd > maxfd) maxfd = pfd;
         }
 
-        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
+        /* 1s timeout so player_tick() runs even when nothing else happens. */
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        int n = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        if (n < 0) {
             if (errno == EINTR) continue;
             break;
         }
+        player_tick();
+        if (n == 0) continue;   /* timeout only */
 
         if (pfd >= 0 && FD_ISSET(pfd, &rfds)) {
             player_poll();
@@ -253,12 +434,49 @@ int main(void)
             }
 
             char req_buf[REQ_BUF_SIZE + 1];
-            ssize_t nread = recv(client_fd, req_buf, REQ_BUF_SIZE, 0);
+            ssize_t nread = recv_headers(client_fd, req_buf, sizeof(req_buf));
             if (nread > 0) {
-                req_buf[nread] = '\0';
                 http_request_t req;
                 if (http_parse(req_buf, &req) == 0) {
-                    dispatch(client_fd, &req);
+                    if (is(&req, "POST", "/api/upload")) {
+                        /* A big file over a slow USB link can take a long
+                         * time. This daemon is single-threaded/single-
+                         * connection, so handling it inline would block the
+                         * whole event loop - including /api/now polling and
+                         * every other control endpoint - for the entire
+                         * transfer, which looks exactly like the daemon
+                         * crashing from the dashboard's side. Fork so the
+                         * transfer runs in the background instead.
+                         *
+                         * This is scoped to /api/upload specifically, not
+                         * every connection: every other endpoint mutates
+                         * in-process state (playback position, output
+                         * routing, media state, ...) that must persist
+                         * across requests, and a forked child's changes to
+                         * that state vanish when it exits - handling those
+                         * inline in this process is required for
+                         * correctness. The one piece of state the upload
+                         * path touches, the library scan-cache flag, only
+                         * governs a few seconds of cache staleness even if
+                         * the child's reset of it is lost, so it's safe to
+                         * let go. SIGCHLD is ignored (see player_start()),
+                         * so the child is reaped automatically. */
+                        pid_t pid = fork();
+                        if (pid == 0) {
+                            close(server_fd);
+                            handle_upload(client_fd, &req, req_buf, nread);
+                            close(client_fd);
+                            _exit(0);
+                        }
+                        if (pid > 0) {
+                            close(client_fd);
+                            continue;
+                        }
+                        /* fork failed (rare): fall back to handling inline. */
+                        handle_upload(client_fd, &req, req_buf, nread);
+                    } else {
+                        dispatch(client_fd, &req);
+                    }
                 } else {
                     http_send_json(client_fd, 400, "Bad Request", "{\"ok\":false}");
                 }

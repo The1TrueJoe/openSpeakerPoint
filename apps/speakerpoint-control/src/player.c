@@ -1,70 +1,144 @@
+/* Media engine: a thin client for MPD (127.0.0.1:6600).
+ *
+ * MPD owns playback, the queue, and library indexing. This used to drive
+ * mpg123 in remote-control mode by hand, which never gave reliable
+ * pause/seek/queue and failed silently when the child wasn't running.
+ *
+ * Album art is still extracted here by parsing ID3 directly off the file
+ * rather than going through MPD's binary art protocol - the files are local
+ * and this code already works, so it avoids a chunk of protocol handling.
+ */
 #include "player.h"
+#include "airplay.h"
+#include "jsonutil.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
-#include <fcntl.h>
-#include <signal.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
 #define MUSIC_DIR "/media/usb"
-#define MAX_TRACKS 400
-#define SCAN_CACHE_SECS 3
+#define MPD_HOST "127.0.0.1"
+#define MPD_PORT 6600
 #define TAG_LEN 256
 #define PATH_LEN 512
+#define MAX_TRACKS 500
 
+static time_t s_rescan_at = 0;
+
+/* ------------------------------------------------------------------ */
+/* MPD connection                                                     */
+/* ------------------------------------------------------------------ */
 typedef struct {
-    char file[PATH_LEN];
-    char title[TAG_LEN];
-    char artist[TAG_LEN];
-    char album[TAG_LEN];
-} track_t;
+    int fd;
+    char buf[4096];
+    size_t len, pos;
+} conn_t;
 
-/* ------------------------------------------------------------------ */
-/* State                                                              */
-/* ------------------------------------------------------------------ */
-static int to_mpg = -1;     /* write commands to mpg123 stdin */
-static int from_mpg = -1;   /* read @ status from mpg123 stdout */
-static pid_t mpg_pid = -1;
+static int conn_fill(conn_t *c)
+{
+    if (c->pos < c->len) return 0;
+    ssize_t n = recv(c->fd, c->buf, sizeof(c->buf), 0);
+    if (n <= 0) return -1;
+    c->len = (size_t)n;
+    c->pos = 0;
+    return 0;
+}
 
-static track_t s_lib[MAX_TRACKS];
-static int s_count = 0;
-static time_t s_scanned = 0;
-
-static int s_index = -1;    /* currently loaded library index */
-static int s_state = 0;     /* 0 stop, 1 pause, 2 play */
-static double s_pos = 0, s_dur = 0;
-
-static char s_linebuf[1024];
-static size_t s_linelen = 0;
-
-/* ------------------------------------------------------------------ */
-/* JSON helpers                                                       */
-/* ------------------------------------------------------------------ */
-static void json_escape(const char *in, char *out, size_t out_len)
+/* Read one '\n'-terminated line (newline stripped). 0 on success. */
+static int conn_line(conn_t *c, char *out, size_t cap)
 {
     size_t o = 0;
-    for (; in && *in && o + 2 < out_len; in++) {
-        unsigned char ch = (unsigned char)*in;
-        if (ch == '"' || ch == '\\') { out[o++] = '\\'; out[o++] = (char)ch; }
-        else if (ch >= 0x20) out[o++] = (char)ch;
+    for (;;) {
+        if (c->pos >= c->len && conn_fill(c) < 0) return -1;
+        char ch = c->buf[c->pos++];
+        if (ch == '\n') break;
+        if (o + 1 < cap) out[o++] = ch;
     }
+    out[o] = '\0';
+    return 0;
+}
+
+static void conn_close(conn_t *c)
+{
+    if (c->fd >= 0) close(c->fd);
+    c->fd = -1;
+}
+
+static int conn_open(conn_t *c)
+{
+    struct sockaddr_in addr;
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    char greeting[128];
+
+    c->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (c->fd < 0) return -1;
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(MPD_PORT);
+    addr.sin_addr.s_addr = inet_addr(MPD_HOST);
+
+    if (connect(c->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        conn_close(c);
+        return -1;
+    }
+    c->len = c->pos = 0;
+    if (conn_line(c, greeting, sizeof(greeting)) != 0) { /* "OK MPD <ver>" */
+        conn_close(c);
+        return -1;
+    }
+    return 0;
+}
+
+static int conn_send(conn_t *c, const char *s)
+{
+    size_t len = strlen(s);
+    return send(c->fd, s, len, 0) == (ssize_t)len ? 0 : -1;
+}
+
+/* Quote an argument per the MPD protocol. */
+static void mpd_quote(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    if (o + 1 < cap) out[o++] = '"';
+    for (; *in && o + 2 < cap; in++) {
+        if (*in == '"' || *in == '\\') out[o++] = '\\';
+        out[o++] = *in;
+    }
+    if (o + 1 < cap) out[o++] = '"';
     out[o] = '\0';
 }
 
-static int json_str_or_null(char *dst, size_t cap, const char *val)
+/* Fire a command, discard the payload, return 0 if MPD said OK. */
+static int mpd_cmd(const char *cmd)
 {
-    if (!val || !*val) return snprintf(dst, cap, "null");
-    char esc[TAG_LEN * 2];
-    json_escape(val, esc, sizeof(esc));
-    return snprintf(dst, cap, "\"%s\"", esc);
+    conn_t c;
+    char line[512];
+    int rc = -1;
+
+    if (conn_open(&c) < 0) return -1;
+    if (conn_send(&c, cmd) == 0) {
+        while (conn_line(&c, line, sizeof(line)) == 0) {
+            if (!strcmp(line, "OK")) { rc = 0; break; }
+            if (!strncmp(line, "ACK", 3)) break;
+        }
+    }
+    conn_close(&c);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
-/* ID3v2 parsing                                                      */
+/* ID3v2 album art (files are local; avoids MPD's binary art protocol)  */
 /* ------------------------------------------------------------------ */
 static unsigned syncsafe(const unsigned char *p)
 {
@@ -77,40 +151,6 @@ static unsigned be32(const unsigned char *p)
            ((unsigned)p[2] << 8) | (unsigned)p[3];
 }
 
-/* Decode an ID3 text-frame payload (enc byte + text) into a UTF-8-ish C
- * string. Handles Latin-1 (0) and UTF-8 (3) directly; UTF-16 (1/2) is
- * down-sampled to its low bytes, which is lossy but keeps ASCII titles
- * readable without pulling in an iconv dependency. */
-static void decode_text(const unsigned char *data, size_t len, char *out, size_t out_len)
-{
-    if (len == 0) { out[0] = '\0'; return; }
-    int enc = data[0];
-    const unsigned char *t = data + 1;
-    size_t tl = len - 1;
-    size_t o = 0;
-
-    if (enc == 1 || enc == 2) {          /* UTF-16 */
-        size_t i = 0;
-        if (tl >= 2 && ((t[0] == 0xff && t[1] == 0xfe) || (t[0] == 0xfe && t[1] == 0xff)))
-            i = 2;                        /* skip BOM */
-        int le = !(tl >= 2 && t[0] == 0xfe && t[1] == 0xff) && enc != 2;
-        for (; i + 1 < tl && o + 1 < out_len; i += 2) {
-            unsigned char c = le ? t[i] : t[i + 1];
-            if (c == 0) break;
-            if (c >= 0x20) out[o++] = (char)c;
-        }
-    } else {                             /* Latin-1 or UTF-8: copy printable */
-        for (size_t i = 0; i < tl && o + 1 < out_len; i++) {
-            if (t[i] == 0) break;
-            if ((unsigned char)t[i] >= 0x20 || (unsigned char)t[i] >= 0x80)
-                out[o++] = (char)t[i];
-        }
-    }
-    out[o] = '\0';
-}
-
-/* Walk the ID3v2 tag at the start of path. For each frame, invoke cb.
- * Returns 0 if a tag was found. cb returns non-zero to stop early. */
 typedef int (*frame_cb)(const char *id, const unsigned char *data, unsigned len, void *ctx);
 
 static int id3_walk(const char *path, frame_cb cb, void *ctx)
@@ -155,26 +195,6 @@ static int id3_walk(const char *path, frame_cb cb, void *ctx)
     return 0;
 }
 
-/* --- tag collection --- */
-typedef struct { char *title, *artist, *album; size_t cap; } tags_ctx;
-
-static int tags_cb(const char *id, const unsigned char *data, unsigned len, void *ctx)
-{
-    tags_ctx *t = ctx;
-    if (!strcmp(id, "TIT2") || !strcmp(id, "TT2")) decode_text(data, len, t->title, t->cap);
-    else if (!strcmp(id, "TPE1") || !strcmp(id, "TP1")) decode_text(data, len, t->artist, t->cap);
-    else if (!strcmp(id, "TALB") || !strcmp(id, "TAL")) decode_text(data, len, t->album, t->cap);
-    return 0;
-}
-
-static void id3_read_tags(const char *path, char *title, char *artist, char *album)
-{
-    title[0] = artist[0] = album[0] = '\0';
-    tags_ctx ctx = { title, artist, album, TAG_LEN };
-    id3_walk(path, tags_cb, &ctx);
-}
-
-/* --- album art extraction --- */
 typedef struct { void *buf; size_t len; char mime[64]; } art_ctx;
 
 static int art_cb(const char *id, const unsigned char *data, unsigned len, void *ctx)
@@ -183,7 +203,7 @@ static int art_cb(const char *id, const unsigned char *data, unsigned len, void 
     if (strcmp(id, "APIC") && strcmp(id, "PIC")) return 0;
     if (len < 4) return 0;
 
-    unsigned p = 1;                       /* skip text encoding */
+    unsigned p = 1;                       /* text encoding */
     if (!strcmp(id, "PIC")) {
         p += 3;                           /* v2.2: 3-char image format */
     } else {
@@ -194,12 +214,12 @@ static int art_cb(const char *id, const unsigned char *data, unsigned len, void 
             memcpy(a->mime, data + 1, mlen);
             a->mime[mlen] = '\0';
         }
-        p++;                              /* NUL after MIME */
+        p++;
     }
     if (p >= len) return 0;
-    p += 1;                               /* picture type byte */
+    p += 1;                               /* picture type */
     while (p < len && data[p]) p++;       /* description */
-    p++;                                  /* NUL after description */
+    p++;
     if (p >= len) return 0;
 
     size_t plen = len - p;
@@ -207,55 +227,192 @@ static int art_cb(const char *id, const unsigned char *data, unsigned len, void 
     if (!a->buf) return 1;
     memcpy(a->buf, data + p, plen);
     a->len = plen;
-    return 1;                             /* stop after first picture */
+    return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Library scan                                                       */
-/* ------------------------------------------------------------------ */
-static int is_mp3(const char *name)
+void *player_albumart(const char *uri, size_t *len, const char **mime)
 {
-    const char *dot = strrchr(name, '.');
-    return dot && !strcasecmp(dot, ".mp3");
-}
+    static char mime_buf[64];
+    char path[PATH_LEN];
+    art_ctx ctx;
 
-static void scan_dir(const char *dir, int depth)
-{
-    if (depth > 6 || s_count >= MAX_TRACKS) return;
-    DIR *d = opendir(dir);
-    if (!d) return;
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(ctx.mime, sizeof(ctx.mime), "image/jpeg");
 
-    struct dirent *e;
-    while ((e = readdir(d)) && s_count < MAX_TRACKS) {
-        if (e->d_name[0] == '.') continue;
-        char path[PATH_LEN];
-        if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= sizeof(path))
-            continue;
-
-        if (e->d_type == DT_DIR) {
-            scan_dir(path, depth + 1);
-        } else if (is_mp3(e->d_name)) {
-            track_t *t = &s_lib[s_count];
-            snprintf(t->file, sizeof(t->file), "%s", path);
-            id3_read_tags(path, t->title, t->artist, t->album);
-            s_count++;
-        }
+    /* MPD URIs are relative to music_directory; also accept an absolute
+     * path, but never outside the music dir. */
+    if (!strncmp(uri, MUSIC_DIR, strlen(MUSIC_DIR))) {
+        snprintf(path, sizeof(path), "%s", uri);
+    } else {
+        if (strstr(uri, "..")) return NULL;
+        snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, uri);
     }
-    closedir(d);
+
+    id3_walk(path, art_cb, &ctx);
+    if (!ctx.buf) return NULL;
+
+    *len = ctx.len;
+    snprintf(mime_buf, sizeof(mime_buf), "%s", ctx.mime[0] ? ctx.mime : "image/jpeg");
+    *mime = mime_buf;
+    return ctx.buf;
 }
 
-static void ensure_library(void)
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                          */
+/* ------------------------------------------------------------------ */
+static void run_usb_detect(void)
 {
-    time_t now = time(NULL);
-    if (s_count > 0 && now - s_scanned < SCAN_CACHE_SECS) return;
-    s_count = 0;
-    scan_dir(MUSIC_DIR, 0);
-    s_scanned = now;
+    (void)system("/usr/bin/usb-detect >/dev/null 2>&1 &");
+    s_rescan_at = time(NULL);
+}
+
+void player_start(void)
+{
+    run_usb_detect();
+}
+
+/* No child process to watch any more - MPD is queried on demand, so state is
+ * always read live rather than tracked incrementally. */
+int player_status_fd(void) { return -1; }
+void player_poll(void) { }
+
+void player_tick(void)
+{
+    airplay_poll();
+    /* AirPlay needs the exclusive codec - hand it over. */
+    if (airplay_active()) {
+        mpd_cmd("pause 1\n");
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Transport                                                          */
+/* ------------------------------------------------------------------ */
+int player_transport(const char *cmd)
+{
+    if (!cmd) return -1;
+    if (!strcmp(cmd, "play"))  return mpd_cmd("play\n");
+    if (!strcmp(cmd, "pause")) return mpd_cmd("pause 1\n");
+    if (!strcmp(cmd, "stop"))  return mpd_cmd("stop\n");
+    if (!strcmp(cmd, "next"))  return mpd_cmd("next\n");
+    if (!strcmp(cmd, "prev"))  return mpd_cmd("previous\n");
+    return -1;
+}
+
+int player_release(void)
+{
+    /* Stop (not pause) so MPD closes the ALSA device: the codec is exclusive
+     * (no software mixer), so another source can't open it otherwise. */
+    return mpd_cmd("stop\n");
+}
+
+int player_seek(int seconds)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "seekcur %d\n", seconds < 0 ? 0 : seconds);
+    return mpd_cmd(cmd);
+}
+
+int player_play_index(int index)
+{
+    char cmd[128];
+    if (index < 0) index = 0;
+    /* Queue the whole library once so next/prev work, then jump to the
+     * chosen track. */
+    snprintf(cmd, sizeof(cmd),
+             "command_list_begin\nclear\nadd \"\"\nplay %d\ncommand_list_end\n", index);
+    return mpd_cmd(cmd);
+}
+
+int player_rescan(void)
+{
+    run_usb_detect();
+    mpd_cmd("update\n");
+    return 0;
+}
+
+void player_invalidate_library(void)
+{
+    /* Database refresh only - must NOT re-enumerate USB (that unbinds the
+     * controller and corrupts an in-flight write; see usb-detect). */
+    mpd_cmd("update\n");
+    s_rescan_at = time(NULL);
+}
+
+int player_delete_track(const char *path)
+{
+    char full[PATH_LEN], cmd[PATH_LEN + 96];
+
+    if (!strncmp(path, MUSIC_DIR, strlen(MUSIC_DIR))) {
+        snprintf(full, sizeof(full), "%s", path);
+    } else {
+        if (strstr(path, "..")) return -1;
+        snprintf(full, sizeof(full), "%s/%s", MUSIC_DIR, path);
+    }
+    if (strstr(full, "..")) return -1;
+
+    snprintf(cmd, sizeof(cmd), "mount -o remount,rw %s 2>/dev/null", MUSIC_DIR);
+    (void)system(cmd);
+    int rc = unlink(full);
+    snprintf(cmd, sizeof(cmd), "sync; mount -o remount,ro %s 2>/dev/null", MUSIC_DIR);
+    (void)system(cmd);
+
+    if (rc == 0) player_invalidate_library();
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status / library                                                   */
+/* ------------------------------------------------------------------ */
+void player_now_json(char *out, size_t out_len)
+{
+    conn_t c;
+    char line[1024];
+    char state[8] = "stop";
+    char file[PATH_LEN] = "", title[TAG_LEN] = "", artist[TAG_LEN] = "", album[TAG_LEN] = "";
+    double elapsed = 0, duration = 0;
+
+    if (conn_open(&c) < 0) {
+        snprintf(out, out_len,
+                 "{\"source\":\"media\",\"state\":\"stop\",\"file\":null,\"title\":null,"
+                 "\"artist\":null,\"album\":null,\"elapsed\":0,\"duration\":0,\"hasArt\":false}");
+        return;
+    }
+
+    conn_send(&c, "command_list_begin\nstatus\ncurrentsong\ncommand_list_end\n");
+    while (conn_line(&c, line, sizeof(line)) == 0) {
+        if (!strcmp(line, "OK") || !strncmp(line, "ACK", 3)) break;
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        const char *k = line, *v = colon + 1;
+        while (*v == ' ') v++;
+
+        if (!strcmp(k, "state")) snprintf(state, sizeof(state), "%s", v);
+        else if (!strcmp(k, "elapsed")) elapsed = atof(v);
+        else if (!strcmp(k, "duration")) duration = atof(v);
+        else if (!strcmp(k, "file")) snprintf(file, sizeof(file), "%s", v);
+        else if (!strcmp(k, "Title")) snprintf(title, sizeof(title), "%s", v);
+        else if (!strcmp(k, "Artist")) snprintf(artist, sizeof(artist), "%s", v);
+        else if (!strcmp(k, "Album")) snprintf(album, sizeof(album), "%s", v);
+    }
+    conn_close(&c);
+
+    char jf[PATH_LEN * 2], jt[TAG_LEN * 2], ja[TAG_LEN * 2], jal[TAG_LEN * 2];
+    json_str_or_null(jf, sizeof(jf), file[0] ? file : NULL);
+    json_str_or_null(jt, sizeof(jt), title[0] ? title : NULL);
+    json_str_or_null(ja, sizeof(ja), artist[0] ? artist : NULL);
+    json_str_or_null(jal, sizeof(jal), album[0] ? album : NULL);
+
+    snprintf(out, out_len,
+             "{\"source\":\"media\",\"state\":\"%s\",\"file\":%s,\"title\":%s,"
+             "\"artist\":%s,\"album\":%s,\"elapsed\":%d,\"duration\":%d,\"hasArt\":%s}",
+             state, jf, jt, ja, jal,
+             (int)(elapsed + 0.5), (int)(duration + 0.5), file[0] ? "true" : "false");
 }
 
 static int usb_present(void)
 {
-    /* /media/usb is a mountpoint only when a drive is mounted. */
     DIR *d = opendir(MUSIC_DIR);
     if (!d) return 0;
     struct dirent *e;
@@ -267,228 +424,76 @@ static int usb_present(void)
     return any;
 }
 
-/* ------------------------------------------------------------------ */
-/* mpg123 -R child                                                    */
-/* ------------------------------------------------------------------ */
-static void mpg_send(const char *cmd)
-{
-    if (to_mpg < 0) return;
-    (void)!write(to_mpg, cmd, strlen(cmd));
-}
-
-void player_start(void)
-{
-    int in_pipe[2], out_pipe[2];   /* in: daemon->mpg123, out: mpg123->daemon */
-    if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0) return;
-
-    mpg_pid = fork();
-    if (mpg_pid < 0) return;
-
-    if (mpg_pid == 0) {
-        dup2(in_pipe[0], STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        close(in_pipe[0]); close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
-        execlp("mpg123", "mpg123", "-R", "--quiet", (char *)NULL);
-        _exit(127);
-    }
-
-    close(in_pipe[0]);
-    close(out_pipe[1]);
-    to_mpg = in_pipe[1];
-    from_mpg = out_pipe[0];
-    fcntl(from_mpg, F_SETFL, O_NONBLOCK);
-    signal(SIGCHLD, SIG_IGN);
-}
-
-int player_status_fd(void)
-{
-    return from_mpg;
-}
-
-static void advance(int delta);
-
-static void parse_status_line(const char *line)
-{
-    if (line[0] != '@' || line[1] == '\0') return;
-    switch (line[1]) {
-    case 'F': {  /* @F <frame> <framesleft> <sec> <secleft> */
-        double cur = 0, left = 0;
-        int a, b;
-        if (sscanf(line + 2, "%d %d %lf %lf", &a, &b, &cur, &left) >= 4) {
-            s_pos = cur;
-            s_dur = cur + left;
-            if (s_state == 0) s_state = 2;
-        }
-        break;
-    }
-    case 'P': {  /* @P 0 stopped, 1 paused, 2 playing */
-        int p = atoi(line + 2);
-        if (p == 2) s_state = 2;
-        else if (p == 1) s_state = 1;
-        else {       /* stopped: natural end -> advance, else user stop */
-            if (s_state == 2 && s_dur > 0 && s_pos >= s_dur - 1.5) advance(1);
-            else s_state = 0;
-        }
-        break;
-    }
-    default:
-        break;   /* @I track info, @E error, @R version - ignored */
-    }
-}
-
-void player_poll(void)
-{
-    if (from_mpg < 0) return;
-    char buf[512];
-    ssize_t n;
-    while ((n = read(from_mpg, buf, sizeof(buf))) > 0) {
-        for (ssize_t i = 0; i < n; i++) {
-            if (buf[i] == '\n') {
-                s_linebuf[s_linelen] = '\0';
-                parse_status_line(s_linebuf);
-                s_linelen = 0;
-            } else if (s_linelen < sizeof(s_linebuf) - 1) {
-                s_linebuf[s_linelen++] = buf[i];
-            }
-        }
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Transport                                                          */
-/* ------------------------------------------------------------------ */
-static void load_index(int index)
-{
-    if (index < 0 || index >= s_count) return;
-    char cmd[PATH_LEN + 8];
-    s_index = index;
-    s_pos = 0;
-    s_dur = 0;
-    s_state = 2;
-    snprintf(cmd, sizeof(cmd), "LOAD %s\n", s_lib[index].file);
-    mpg_send(cmd);
-}
-
-static void advance(int delta)
-{
-    ensure_library();
-    if (s_count == 0) { s_state = 0; return; }
-    int next = s_index + delta;
-    if (next < 0) next = 0;
-    if (next >= s_count) { s_state = 0; mpg_send("STOP\n"); return; }
-    load_index(next);
-}
-
-int player_play_index(int index)
-{
-    ensure_library();
-    if (index < 0 || index >= s_count) return -1;
-    load_index(index);
-    return 0;
-}
-
-int player_transport(const char *cmd)
-{
-    if (!cmd) return -1;
-    if (!strcmp(cmd, "play")) {
-        if (s_state == 1) mpg_send("PAUSE\n");         /* resume */
-        else if (s_index >= 0) load_index(s_index);    /* (re)start current */
-        else return player_play_index(0);
-    } else if (!strcmp(cmd, "pause")) {
-        if (s_state == 2) mpg_send("PAUSE\n");
-    } else if (!strcmp(cmd, "stop")) {
-        s_state = 0;
-        mpg_send("STOP\n");
-    } else if (!strcmp(cmd, "next")) {
-        advance(1);
-    } else if (!strcmp(cmd, "prev")) {
-        advance(-1);
-    } else {
-        return -1;
-    }
-    return 0;
-}
-
-int player_pause(void)
-{
-    if (s_state == 2) mpg_send("PAUSE\n");
-    return 0;
-}
-
-int player_seek(int seconds)
-{
-    char cmd[32];
-    if (seconds < 0) seconds = 0;
-    snprintf(cmd, sizeof(cmd), "JUMP %ds\n", seconds);
-    mpg_send(cmd);
-    s_pos = seconds;
-    return 0;
-}
-
-int player_rescan(void)
-{
-    s_scanned = 0;   /* force next ensure_library() to rescan */
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* JSON output                                                        */
-/* ------------------------------------------------------------------ */
-void player_now_json(char *out, size_t out_len)
-{
-    const char *state = s_state == 2 ? "play" : s_state == 1 ? "pause" : "stop";
-    const track_t *t = (s_index >= 0 && s_index < s_count) ? &s_lib[s_index] : NULL;
-    char jf[PATH_LEN * 2], jt[TAG_LEN * 2], ja[TAG_LEN * 2], jal[TAG_LEN * 2];
-
-    json_str_or_null(jf, sizeof(jf), t ? t->file : NULL);
-    json_str_or_null(jt, sizeof(jt), t ? t->title : NULL);
-    json_str_or_null(ja, sizeof(ja), t ? t->artist : NULL);
-    json_str_or_null(jal, sizeof(jal), t ? t->album : NULL);
-
-    snprintf(out, out_len,
-             "{\"state\":\"%s\",\"file\":%s,\"title\":%s,\"artist\":%s,\"album\":%s,"
-             "\"elapsed\":%d,\"duration\":%d,\"hasArt\":%s}",
-             (s_state == 0) ? "stop" : state, jf, jt, ja, jal,
-             (int)(s_pos + 0.5), (int)(s_dur + 0.5), t ? "true" : "false");
-}
-
 void player_library_json(char *out, size_t out_len)
 {
-    ensure_library();
+    conn_t c;
+    char line[1024];
     size_t o = 0;
-    o += snprintf(out + o, out_len - o, "{\"usb\":%s,\"updating\":false,\"tracks\":[",
-                  usb_present() ? "true" : "false");
+    int count = 0, updating = 0, have_track = 0;
+    char file[PATH_LEN] = "", title[TAG_LEN] = "", artist[TAG_LEN] = "", album[TAG_LEN] = "";
+    double dur = 0;
 
-    for (int i = 0; i < s_count && out_len - o > 1400; i++) {
-        char jf[PATH_LEN * 2], jt[TAG_LEN * 2], ja[TAG_LEN * 2], jal[TAG_LEN * 2];
-        const char *name = strrchr(s_lib[i].file, '/');
-        json_str_or_null(jf, sizeof(jf), s_lib[i].file);
-        json_str_or_null(jt, sizeof(jt), s_lib[i].title[0] ? s_lib[i].title : (name ? name + 1 : s_lib[i].file));
-        json_str_or_null(ja, sizeof(ja), s_lib[i].artist);
-        json_str_or_null(jal, sizeof(jal), s_lib[i].album);
-        o += snprintf(out + o, out_len - o,
-                      "%s{\"file\":%s,\"title\":%s,\"artist\":%s,\"album\":%s,"
-                      "\"duration\":0,\"hasArt\":true}",
-                      i ? "," : "", jf, jt, ja, jal);
+    /* A DB update in flight, or one we just asked for. */
+    if (conn_open(&c) == 0) {
+        conn_send(&c, "status\n");
+        while (conn_line(&c, line, sizeof(line)) == 0) {
+            if (!strcmp(line, "OK") || !strncmp(line, "ACK", 3)) break;
+            if (!strncmp(line, "updating_db:", 12)) updating = 1;
+        }
+        conn_close(&c);
     }
+    if (time(NULL) - s_rescan_at < 6) updating = 1;
+
+    o += snprintf(out + o, out_len - o, "{\"usb\":%s,\"updating\":%s,\"tracks\":[",
+                  usb_present() ? "true" : "false", updating ? "true" : "false");
+
+    if (conn_open(&c) < 0) {
+        snprintf(out, out_len, "{\"usb\":false,\"updating\":false,\"tracks\":[]}");
+        return;
+    }
+
+    conn_send(&c, "listallinfo\n");
+    for (;;) {
+        if (conn_line(&c, line, sizeof(line)) != 0) break;
+        int done = (!strcmp(line, "OK") || !strncmp(line, "ACK", 3));
+        char *colon = done ? NULL : strchr(line, ':');
+
+        /* A new "file:" (or the end) flushes the previous entry. */
+        if ((colon && !strncmp(line, "file:", 5)) || done) {
+            if (have_track && count < MAX_TRACKS && out_len - o > 1600) {
+                char jf[PATH_LEN * 2], jt[TAG_LEN * 2], ja[TAG_LEN * 2], jal[TAG_LEN * 2];
+                const char *base = strrchr(file, '/');
+                json_str_or_null(jf, sizeof(jf), file);
+                json_str_or_null(jt, sizeof(jt),
+                                 title[0] ? title : (base ? base + 1 : file));
+                json_str_or_null(ja, sizeof(ja), artist);
+                json_str_or_null(jal, sizeof(jal), album);
+                o += snprintf(out + o, out_len - o,
+                              "%s{\"file\":%s,\"title\":%s,\"artist\":%s,\"album\":%s,"
+                              "\"duration\":%d,\"hasArt\":true}",
+                              count ? "," : "", jf, jt, ja, jal, (int)(dur + 0.5));
+                count++;
+            }
+            file[0] = title[0] = artist[0] = album[0] = '\0';
+            dur = 0;
+            have_track = 0;
+        }
+        if (done) break;
+        if (!colon) continue;
+
+        *colon = '\0';
+        const char *k = line, *v = colon + 1;
+        while (*v == ' ') v++;
+
+        if (!strcmp(k, "file")) { snprintf(file, sizeof(file), "%s", v); have_track = 1; }
+        else if (!strcmp(k, "Title")) snprintf(title, sizeof(title), "%s", v);
+        else if (!strcmp(k, "Artist")) snprintf(artist, sizeof(artist), "%s", v);
+        else if (!strcmp(k, "Album")) snprintf(album, sizeof(album), "%s", v);
+        else if (!strcmp(k, "duration")) dur = atof(v);
+        else if (!strcmp(k, "Time") && dur == 0) dur = atof(v);
+    }
+    conn_close(&c);
+
     snprintf(out + o, out_len - o, "]}");
-}
-
-void *player_albumart(const char *uri, size_t *len, const char **mime)
-{
-    static char mime_buf[64];
-    art_ctx ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    snprintf(ctx.mime, sizeof(ctx.mime), "image/jpeg");
-
-    /* Only serve art for files inside the music dir. */
-    if (strncmp(uri, MUSIC_DIR, strlen(MUSIC_DIR)) != 0) return NULL;
-    id3_walk(uri, art_cb, &ctx);
-    if (!ctx.buf) return NULL;
-
-    *len = ctx.len;
-    snprintf(mime_buf, sizeof(mime_buf), "%s", ctx.mime[0] ? ctx.mime : "image/jpeg");
-    *mime = mime_buf;
-    return ctx.buf;
+    (void)mpd_quote;   /* reserved for future quoted-arg commands */
 }

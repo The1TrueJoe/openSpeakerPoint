@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# airplay-hook - shairport-sync session hook.
+#
+# Called "begin" when an AirPlay stream starts and "end" when it stops. We just
+# toggle a flag file; the control daemon watches it, pauses USB media while
+# AirPlay is active, and reports AirPlay status to the dashboard.
+
+FLAG=/run/airplay.active
+
+case "${1:-}" in
+begin) : > "$FLAG" ;;
+end)   rm -f "$FLAG" ;;
+esac
+
+exit 0

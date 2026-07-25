@@ -1,15 +1,8 @@
 #!/bin/sh
 # Front-panel boot animation: sweep left-to-right (data -> network -> power),
-# then leave power lit (its normal steady state).
-#
-# LED sysfs names come from the gpio-leds node in ep93xx-speakerpoint.dts,
-# whose GPIO mapping + active-low polarity was recovered from the stock
-# pdriver.o. The IR emitter (led "ir") is deliberately NOT part of the
-# animation. Power is also default-on via its DT trigger, so it stays lit
-# even if this script never runs.
-#
-# The script is name-based and degrades gracefully: if a given LED sysfs
-# node is absent it is simply skipped, so a DT label change can't break boot.
+# then leave power lit. IR is deliberately not part of the animation.
+# LED names come from the gpio-leds node in ep93xx-speakerpoint.dts; a
+# missing sysfs node is skipped rather than failing.
 
 LEDS="/sys/class/leds"
 
@@ -22,35 +15,26 @@ led_off() {
 
 case "$1" in
 start)
-	# Power is lit at boot via the DT default-state; the animation drives
-	# it directly with brightness and leaves it on at the end.
-
-	# --- all off ---
 	for l in data network power; do led_off "$l"; done
 
-	# --- sweep on: data -> network -> power ---
 	led_on data;    sleep 0.15
 	led_on network; sleep 0.15
 	led_on power;   sleep 0.4
 
-	# --- sweep off: power -> network -> data ---
 	led_off power;   sleep 0.1
 	led_off network; sleep 0.1
 	led_off data;    sleep 0.15
 
-	# --- second sweep on ---
 	led_on data;    sleep 0.12
 	led_on network; sleep 0.12
 	led_on power;   sleep 0.5
 
-	# --- settle: data/network off, power steady on ---
 	led_off data
 	led_off network
 	led_on power
 	;;
 stop)
 	for l in data network; do led_off "$l"; done
-	# leave power lit
 	;;
 *)
 	echo "Usage: $0 {start|stop}" >&2

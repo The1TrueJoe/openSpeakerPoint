@@ -4,6 +4,7 @@ import type {
   NowPlaying,
   OutputMode,
   PlaybackState,
+  SourceMode,
   ToneChannel,
 } from "./types";
 
@@ -28,6 +29,7 @@ const post = (path: string) => request<{ ok: boolean }>(path, { method: "POST" }
 export const api = {
   getState: () => request<DeviceState>("/api/state"),
   setOutput: (value: OutputMode) => request<DeviceState>(`/api/output?value=${value}`, { method: "POST" }),
+  setSource: (value: SourceMode) => request<DeviceState>(`/api/source?value=${value}`, { method: "POST" }),
   setVolume: (value: number) =>
     request<DeviceState>(`/api/volume?value=${Math.round(value)}`, { method: "POST" }),
 
@@ -41,6 +43,24 @@ export const api = {
   getLibrary: () => request<Library>("/api/library"),
   playTrack: (index: number) => post(`/api/play?index=${index}`),
   rescan: () => post("/api/rescan"),
+  deleteTrack: (file: string) => post(`/api/delete?file=${encodeURIComponent(file)}`),
+
+  /** XHR (not fetch) so we get real upload progress events. */
+  uploadWithProgress: (file: File, onProgress: (pct: number) => void) =>
+    new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/upload?name=${encodeURIComponent(file.name)}`);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(file);
+    }),
 
   albumArtUrl: (file: string | null | undefined) =>
     file ? `${API_BASE}/api/albumart?file=${encodeURIComponent(file)}` : null,

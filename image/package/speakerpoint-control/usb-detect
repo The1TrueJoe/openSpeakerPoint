@@ -1,0 +1,58 @@
+#!/bin/sh
+# Force USB re-enumeration and mount the drive. The EP93xx OHCI root hub
+# doesn't reliably raise a connect-change interrupt for a hot-plugged drive,
+# so re-bind the platform driver to make it re-scan its ports (confirmed on
+# hardware). Idempotent: does nothing if a drive is already mounted.
+
+DRV=/sys/bus/platform/drivers/ohci-platform
+USBDEV=80020000.usb
+MNT=/media/usb
+
+log() { logger -t usb-detect "$*" 2>/dev/null || true; }
+
+if mountpoint -q "$MNT" 2>/dev/null; then
+	exit 0
+fi
+
+if [ -e "$DRV/$USBDEV" ]; then
+	echo "$USBDEV" > "$DRV/unbind" 2>/dev/null || true
+	sleep 1
+	echo "$USBDEV" > "$DRV/bind" 2>/dev/null || true
+	log "re-bound $USBDEV"
+fi
+
+part=""
+i=0
+while [ "$i" -lt 8 ]; do
+	for p in /dev/sd[a-z][0-9]*; do
+		[ -b "$p" ] && { part="$p"; break; }
+	done
+	[ -n "$part" ] && break
+	i=$((i + 1))
+	sleep 1
+done
+
+[ -n "$part" ] || { log "no USB partition found"; exit 0; }
+
+# Cap per-request transfer size. The EP93xx OHCI is full-speed only (12Mbps),
+# and the block layer's default (~120KB+) overruns it on sustained writes:
+# the drive reports "Unaligned partial completion (resid=...)" and the write
+# fails, which is what made uploads die mid-transfer. 64KB requests stay well
+# inside what a full-speed link completes in time.
+disk="${part%%[0-9]*}"
+disk="${disk##*/}"
+for q in "/sys/block/$disk/queue/max_sectors_kb"; do
+	[ -w "$q" ] && echo 64 > "$q" 2>/dev/null && log "capped $disk max_sectors_kb=64"
+done
+
+mkdir -p "$MNT"
+for fs in vfat exfat ext4 auto; do
+	if mount -t "$fs" -o ro,noatime,iocharset=utf8 "$part" "$MNT" 2>/dev/null ||
+	   mount -t "$fs" -o ro,noatime "$part" "$MNT" 2>/dev/null; then
+		log "mounted $part ($fs) at $MNT"
+		exit 0
+	fi
+done
+
+log "failed to mount $part"
+exit 0

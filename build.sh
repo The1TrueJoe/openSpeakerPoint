@@ -240,20 +240,51 @@ if should_build_dashboard_assets "$@"; then
     build_dashboard_assets
 fi
 
+# Buildroot's package stamps don't know about source edits to anything we
+# inject/patch/local-site outside its normal download-and-verify flow, and a
+# Docker BuildKit cache mount persists output/ across separate `docker build`
+# runs - so a package already extracted/patched/built from an earlier run
+# (even one that failed later, at build/link) keeps its stale sources and
+# object files forever unless something re-triggers dirclean. That bit us for
+# linux (DTS overlay + injected ep93xx-ac97/speakerpoint-card sources), and -
+# the same class of bug - every package we patch via BR2_GLOBAL_PATCH_DIR
+# (image/package/<name>/*.patch, e.g. i2c-tools, shairport-sync) or that's a
+# SITE_METHOD=local package under image/package/ (source lives in apps/ or
+# drivers/, not a normal Buildroot download). Force-dirclean all of them
+# together, discovered from image/package/ itself, so a newly patched or
+# added local package is covered automatically instead of needing another
+# hardcoded line here each time (which is exactly how this bit us before).
 if should_force_linux_rebuild "$@"; then
     echo "info: forcing a clean linux package rebuild (DTS overlay / injected driver sources aren't tracked as build deps, and only dirclean re-runs the patch step that copies them in)"
     make "${MAKE_ARGS[@]}" "${TOPLEVEL_ARGS[@]}" linux-dirclean
-fi
 
-# Same staleness class as linux, for any other package we patch via
-# BR2_GLOBAL_PATCH_DIR (image/package/<name>/*.patch): Buildroot's stamps
-# don't know our patch changed, so a package already extracted+patched from
-# an earlier build (e.g. one that failed later, at build/link) keeps its
-# stale .stamp_patched and pre-patch object files forever without this.
-# Add future patched packages here the same way if this bites again.
-if should_force_linux_rebuild "$@"; then
-    echo "info: forcing a clean i2c-tools rebuild (image/package/i2c-tools/*.patch isn't tracked as a build dep either)"
-    make "${MAKE_ARGS[@]}" "${TOPLEVEL_ARGS[@]}" i2c-tools-dirclean
+    # Iterate every package directory itself (not just ones with a .mk) -
+    # a BR2_GLOBAL_PATCH_DIR-only package like i2c-tools or shairport-sync
+    # has nothing but a *.patch file here, no local .mk of its own, so a
+    # glob over */*.mk alone would silently never match it.
+    force_clean_pkgs=""
+    for pkg_dir in "$EXTERNAL_DIR"/package/*/; do
+        [ -d "$pkg_dir" ] || continue
+        pkg_name="$(basename "$pkg_dir")"
+        is_local=0
+        pkg_mk="$pkg_dir$pkg_name.mk"
+        if [ -f "$pkg_mk" ] && grep -qE '^[A-Z0-9_]+_SITE_METHOD[[:space:]]*=[[:space:]]*local[[:space:]]*$' "$pkg_mk"; then
+            is_local=1
+        fi
+        has_patch=0
+        for p in "$pkg_dir"*.patch; do
+            [ -e "$p" ] && has_patch=1
+            break
+        done
+        if [ "$is_local" -eq 1 ] || [ "$has_patch" -eq 1 ]; then
+            force_clean_pkgs="$force_clean_pkgs $pkg_name"
+        fi
+    done
+
+    for pkg_name in $force_clean_pkgs; do
+        echo "info: forcing a clean $pkg_name rebuild (local BR2_EXTERNAL package and/or patched via BR2_GLOBAL_PATCH_DIR - not tracked as a build dep either way)"
+        make "${MAKE_ARGS[@]}" "${TOPLEVEL_ARGS[@]}" "${pkg_name}-dirclean"
+    done
 fi
 
 set +e

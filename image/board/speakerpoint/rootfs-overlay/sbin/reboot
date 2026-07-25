@@ -1,18 +1,6 @@
 #!/bin/sh
-# EP93xx reboot.
-# Hardware reset is performed by K99z-ep93xx-reset which runs devmem writes
-# to SYSCON DEVCFG SWRST (bit 31) as the last action in the init shutdown
-# sequence, before reboot(2) is ever called.
+# Hands off to BusyBox init's normal reboot sequence, which runs the rcK
+# shutdown scripts (including S01z-ep93xx-reset's actual hardware reset)
+# before the reboot(2) syscall itself is ever reached.
 sync
-exec /bin/busybox reboot
-
-sync
-
-# Arm the hardware watchdog.  Writing any byte starts it; not writing 'V'
-# (magic close) means the driver will not disable it when the fd is closed,
-# so the hardware reset fires after the timeout regardless of what happens.
-if [ -c /dev/watchdog ]; then
-	printf 'X' > /dev/watchdog 2>/dev/null || true
-fi
-
 exec /bin/busybox reboot

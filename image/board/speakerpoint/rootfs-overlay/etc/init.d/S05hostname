@@ -1,0 +1,30 @@
+#!/bin/sh
+# Set the runtime hostname to speakerpoint-<mac>, so units are distinguishable
+# in `hostname`, syslog, and (shairport-sync defaults its AirPlay name to the
+# hostname when unconfigured) the AirPlay device picker. eth0's MAC is
+# available in sysfs immediately, no DHCP wait needed. Runs at S05, before
+# networking and well before shairport-sync's S99, so both DHCP and AirPlay
+# see it from boot. Only sets the runtime hostname (sethostname); the
+# build-time "speakerpoint" in /etc/hostname stays as a static fallback.
+
+MAC_FILE=/sys/class/net/eth0/address
+
+case "$1" in
+start)
+	if [ -r "$MAC_FILE" ]; then
+		mac="$(cat "$MAC_FILE" 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')"
+		if [ -n "$mac" ] && [ "$mac" != "000000000000" ]; then
+			hostname "speakerpoint-$mac"
+		fi
+	fi
+	;;
+stop)
+	:
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+	;;
+esac
+
+exit 0

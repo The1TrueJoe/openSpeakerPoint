@@ -1,140 +1,219 @@
 #!/bin/sh
+# speakerpoint-audio-apply - declarative audio routing for the SpeakerPoint.
 #
-# speakerpoint-audio-apply - real hardware audio control for the SpeakerPoint.
+# One call sets the COMPLETE desired hardware state:
+#   speakerpoint-audio-apply apply <output> <source> <volume>
+#     output: off|rca|amp|both   source: media|linein   volume: 0-100
 #
-# Two independent outputs share one PCM source (AC97 slots 3&4):
+# Everything is (re)written every time rather than mutated incrementally, so
+# the hardware can't drift out of sync with what the daemon thinks is set -
+# which is exactly how the amp ended up hard-muted at the chip while every
+# ALSA control read back as unmuted.
 #
-#   RCA line out : STAC9758 analog front DACs.
-#                  Controlled purely through ALSA (Master/Front/PCM).
+# Other subcommands:
+#   speakerpoint-audio-apply status          machine-readable hardware state
+#   speakerpoint-audio-apply tone <ch>       pink noise (left|right|both)
+#   speakerpoint-audio-apply tone-stop
 #
-#   Amp/speakers : STAC9758 S/PDIF transmitter -> D2-41051 (D2Audio) -> speaker
-#                  terminals. Requires the codec S/PDIF transmitter enabled and
-#                  its slot assignment pointed at the PCM slots (3&4), i.e.
-#                  IEC958 Playback Switch = on and AC97-SPSA = 0. The amp's own
-#                  level is the D2 master-volume register (0x000000) over I2C
-#                  bus 0, address 0x59 (0x800000 = 0dB, 0x000000 = full cut).
-#
-# Register facts confirmed from the D2-4 API spec (R32AN0004) and the STAC9752/3
-# AC97 2.3 datasheet; the amp boots firmware from internal ROM and defaults to
-# S/PDIF-selected input on this board.
-#
-# Usage:
-#   speakerpoint-audio-apply init                     one-time boot setup
-#   speakerpoint-audio-apply output off|rca|amp|both
-#   speakerpoint-audio-apply volume <0-100>           applied to active output(s)
+# Signal paths:
+#   RCA out : PCM -> STAC9758 analog DACs -> Master/Front -> RCA jacks
+#   Amp     : PCM -> AC97 slots 3&4 -> STAC S/PDIF TX -> D2-41051 -> speakers
+#             (needs IEC958 switch on AND SPSA=0 so the transmitter reads the
+#             slots the PCM audio is actually in; the D2 also has its own
+#             master-volume register that must be un-muted separately)
 
-set -eu
+set -u
 
 CARD=0
 I2C_BUS=0
 D2_ADDR=0x59
+LOGTAG=speakerpoint-audio
+
+AC97_REGS="/proc/asound/card${CARD}/codec97#0/ac97#0-0+regs"
+SPDIF_SW="IEC958 Playback Switch"
+SPDIF_SPSA="IEC958 Playback AC97-SPSA"
 
 have() { command -v "$1" >/dev/null 2>&1; }
-amix() { amixer -c "$CARD" "$@" >/dev/null 2>&1 || true; }
+log()  { logger -t "$LOGTAG" "$*" 2>/dev/null || true; }
+warn() { logger -t "$LOGTAG" -p user.warn "$*" 2>/dev/null || true; echo "warn: $*" >&2; }
 
-# numid controls: 41 = IEC958 Playback Switch, 42 = IEC958 AC97-SPSA
-spdif_on()  { amix cset numid=41 on;  amix cset numid=42 0; }
-spdif_off() { amix cset numid=41 off; }
-
-# --- D2 amp (I2C) helpers ---------------------------------------------------
-# 24-bit register address + 24-bit data, MSB first on the wire.
-d2_write() { # d2_write AAAAAA DDDDDD  (6 hex chars each)
-	[ -c "/dev/i2c-${I2C_BUS}" ] || return 0
-	have i2ctransfer || return 0
-	a="$1"; d="$2"
-	i2ctransfer -y "$I2C_BUS" "w6@${D2_ADDR}" \
-		"0x$(echo "$a" | cut -c1-2)" "0x$(echo "$a" | cut -c3-4)" "0x$(echo "$a" | cut -c5-6)" \
-		"0x$(echo "$d" | cut -c1-2)" "0x$(echo "$d" | cut -c3-4)" "0x$(echo "$d" | cut -c5-6)" \
-		>/dev/null 2>&1 || true
+# Unlike the old helper, these report failures instead of hiding them behind
+# "|| true" - a silently-failing mixer write is the hardest class of bug to
+# find on this box.
+amix() {
+	if ! out=$(amixer -c "$CARD" "$@" 2>&1); then
+		warn "amixer $*: ${out%%
+*}"
+		return 1
+	fi
+	return 0
 }
 
-# Map a 0-100 volume to the D2 signed-24-bit master-volume parameter.
-# 100 -> 0x800000 (0dB), 0 -> 0x000000 (full cut); otherwise -0.5dB per step
-# below 100 using the API's parameter = -2^23 * 10^(-atten/20).
+# --- D2-41051 amp over I2C: 24-bit register address + 24-bit data, MSB first
+d2_write() { # d2_write AAAAAA DDDDDD
+	[ -c "/dev/i2c-${I2C_BUS}" ] || { warn "no /dev/i2c-${I2C_BUS}"; return 1; }
+	have i2ctransfer || { warn "i2ctransfer missing"; return 1; }
+	a="$1"; d="$2"
+	if ! out=$(i2ctransfer -y "$I2C_BUS" "w6@${D2_ADDR}" \
+		"0x$(echo "$a" | cut -c1-2)" "0x$(echo "$a" | cut -c3-4)" "0x$(echo "$a" | cut -c5-6)" \
+		"0x$(echo "$d" | cut -c1-2)" "0x$(echo "$d" | cut -c3-4)" "0x$(echo "$d" | cut -c5-6)" 2>&1); then
+		warn "d2 write $a=$d: ${out%%
+*}"
+		return 1
+	fi
+	return 0
+}
+
+d2_read() { # d2_read AAAAAA -> "0xXX 0xXX 0xXX"
+	[ -c "/dev/i2c-${I2C_BUS}" ] || return 1
+	have i2ctransfer || return 1
+	a="$1"
+	i2ctransfer -y "$I2C_BUS" "w3@${D2_ADDR}" \
+		"0x$(echo "$a" | cut -c1-2)" "0x$(echo "$a" | cut -c3-4)" "0x$(echo "$a" | cut -c5-6)" \
+		"r3" 2>/dev/null
+}
+
+# 0-100 -> D2 signed-24-bit master volume. 100 = 0x800000 (0dB), 0 = full cut.
+#
+# Precomputed table rather than floating-point math at runtime: this ran
+# through awk before, and when that produced nothing the fallback silently
+# wrote "full volume" for EVERY setting - so volume and mute did nothing at
+# all while the readback looked plausible. A table has no dependencies and
+# no failure mode. Values are -2^23 * 10^(-atten/20) with atten=(100-v)*0.5,
+# i.e. 0 -> -50dB, 100 -> 0dB, rounded to the nearest 5% step.
 d2_vol_hex() {
 	v="$1"
-	if [ "$v" -le 0 ] 2>/dev/null; then echo "000000"; return; fi
-	if [ "$v" -ge 100 ] 2>/dev/null; then echo "800000"; return; fi
-	if have awk; then
-		awk -v v="$v" 'BEGIN{
-			atten=(100-v)*0.5;
-			p=-8388608*exp(-atten/20*log(10));
-			p=int(p+(p<0?-0.5:0.5));
-			if(p<0) p=16777216+p;
-			printf "%06x", p%16777216;
-		}'
-	else
-		echo "800000"
-	fi
-}
-
-d2_set_volume() { d2_write "000000" "$(d2_vol_hex "$1")"; }
-d2_mute()       { d2_write "000000" "000000"; }
-# Select S/PDIF as the D2 input (0xC00001); harmless if already set.
-d2_input_spdif(){ d2_write "020001" "c00001"; }
-
-# --- top-level actions ------------------------------------------------------
-do_init() {
-	# Common source: PCM must be audible for either output to carry sound.
-	amix sset PCM 100% unmute
-	# Make the amp listen to S/PDIF (matches the stock/boot default).
-	d2_input_spdif
-	# Leave everything silenced until an explicit output is chosen.
-	amix sset Master mute
-	amix sset Front mute
-	spdif_off
-	d2_mute
-}
-
-set_output() {
-	case "$1" in
-	off)
-		amix sset Master mute
-		amix sset Front mute
-		spdif_off
-		d2_mute
-		;;
-	rca)
-		amix sset PCM 100% unmute
-		amix sset Master unmute
-		amix sset Front unmute
-		spdif_off
-		d2_mute
-		;;
-	amp)
-		amix sset PCM 100% unmute
-		amix sset Master mute
-		amix sset Front mute
-		spdif_on
-		d2_input_spdif
-		;;
-	both)
-		amix sset PCM 100% unmute
-		amix sset Master unmute
-		amix sset Front unmute
-		spdif_on
-		d2_input_spdif
-		;;
-	*)
-		echo "output must be off|rca|amp|both" >&2
-		return 1
-		;;
+	[ "$v" -ge 0 ] 2>/dev/null || v=0      # non-numeric/negative -> 0
+	[ "$v" -le 100 ] 2>/dev/null || v=100
+	v=$(( (v + 2) / 5 * 5 ))   # nearest 5% step
+	case "$v" in
+	0)   echo 000000 ;;
+	5)   echo ff75d2 ;;
+	10)  echo ff47bb ;;
+	15)  echo ff0a46 ;;
+	20)  echo feb852 ;;
+	25)  echo fe4b08 ;;
+	30)  echo fdb94b ;;
+	35)  echo fcf6f3 ;;
+	40)  echo fbf3c9 ;;
+	45)  echo fa9a2f ;;
+	50)  echo f8cd52 ;;
+	55)  echo f666bf ;;
+	60)  echo f33333 ;;
+	65)  echo eeee51 ;;
+	70)  echo e93cef ;;
+	75)  echo e1a57c ;;
+	80)  echo d785d9 ;;
+	85)  echo ca05d9 ;;
+	90)  echo b80533 ;;
+	95)  echo a00377 ;;
+	*)   echo 800000 ;;
 	esac
 }
 
-set_volume() {
-	v="$1"
-	# RCA path level (STAC analog Master + Front).
-	amix sset Master "${v}%"
-	amix sset Front "${v}%"
-	# Amp path level (D2 master volume); no-op unless the amp is enabled.
-	d2_set_volume "$v"
+# --- the one declarative entry point ---------------------------------------
+do_apply() {
+	output="$1"; source="$2"; volume="$3"
+
+	case "$output" in off|rca|amp|both) ;; *) warn "bad output '$output'"; return 1 ;; esac
+	case "$source" in media|linein) ;;    *) warn "bad source '$source'"; return 1 ;; esac
+	[ "$volume" -ge 0 ] 2>/dev/null && [ "$volume" -le 100 ] 2>/dev/null || {
+		warn "bad volume '$volume'"; return 1; }
+
+	analog=no; digital=no
+	case "$output" in
+		rca)  analog=yes ;;
+		amp)  digital=yes ;;
+		both) analog=yes; digital=yes ;;
+	esac
+
+	# PCM is the common source feeding BOTH paths (the analog DACs and the
+	# S/PDIF transmitter both read it), so it stays fully up whenever any
+	# output is active and only the per-path stages below do the muting.
+	if [ "$output" = "off" ]; then
+		amix sset PCM 0% mute
+	else
+		amix sset PCM 100% unmute
+	fi
+
+	# Silence every mixer path this board doesn't use. The STAC9758 is a
+	# 6-channel codec on a stereo product, and its unused channels and analog
+	# input paths sum into the same output - left at whatever state they
+	# happened to be in, they add audible hiss/crosstalk. "Declarative" has
+	# to mean ALL the state, not just the parts we actively set, or noise
+	# leaks back in from whatever touched the mixer last.
+	for c in Surround Center LFE "Master Mono" "Surround Mix"; do
+		amix sset "$c" 0% mute 2>/dev/null
+	done
+	for c in CD Aux Phone Mic "PC Speaker" "Video"; do
+		amix sset "$c" 0% mute 2>/dev/null
+	done
+	# Line-in is only unmuted into the mix when it's the selected source.
+	if [ "$source" != linein ]; then
+		amix sset Line 0% mute 2>/dev/null
+	fi
+
+	# --- analog path (RCA) ---
+	if [ "$analog" = yes ]; then
+		amix sset Master "${volume}%" unmute
+		amix sset Front  "${volume}%" unmute
+	else
+		amix sset Master mute
+		amix sset Front  mute
+	fi
+
+	# --- digital path (S/PDIF -> D2 amp) ---
+	if [ "$digital" = yes ]; then
+		# SPSA=0 points the transmitter at slots 3&4, where the PCM audio
+		# actually is. Without this it reads empty slots and sends silence.
+		amix cset name="$SPDIF_SPSA" 0
+		amix cset name="$SPDIF_SW" on
+		d2_write "020001" "c00001"                 # amp input = S/PDIF
+		d2_write "000000" "$(d2_vol_hex "$volume")" # amp master volume
+	else
+		amix cset name="$SPDIF_SW" off
+		d2_write "000000" "000000"                 # amp hard mute
+	fi
+
+	# --- capture path (line-in loopback) ---
+	if [ "$source" = linein ]; then
+		linein_start
+	else
+		linein_stop
+	fi
+
+	log "applied output=$output source=$source volume=$volume"
+	return 0
 }
 
-# --- test tones (speaker-test) ----------------------------------------------
-# Pink noise only, on the selected channel, through whatever output is
-# currently routed. speaker-test opens the ALSA device exclusively, so the
-# caller (the daemon) pauses mpg123 first.
+# --- line-in loopback (alsaloop) -------------------------------------------
+LINEIN_PIDFILE=/var/run/speakerpoint-linein.pid
+
+linein_stop() {
+	if [ -f "$LINEIN_PIDFILE" ]; then
+		kill "$(cat "$LINEIN_PIDFILE")" 2>/dev/null || true
+		rm -f "$LINEIN_PIDFILE"
+	fi
+	killall alsaloop 2>/dev/null || true
+}
+
+linein_start() {
+	have alsaloop || { warn "alsaloop missing"; return 1; }
+	# Already running? leave it alone rather than restarting on every apply.
+	if [ -f "$LINEIN_PIDFILE" ] && kill -0 "$(cat "$LINEIN_PIDFILE")" 2>/dev/null; then
+		return 0
+	fi
+	linein_stop
+	amix sset "Line" 80% unmute
+	amix sset Capture 80% cap
+	amix cset name="Capture Source" Line
+	(
+		alsaloop -C sp_capture -P default -t 50000 >/dev/null 2>&1 &
+		echo "$!" > "$LINEIN_PIDFILE"
+	) &
+}
+
+# --- test tones -------------------------------------------------------------
 TONE_PIDFILE=/var/run/speakerpoint-tone.pid
 
 tone_stop() {
@@ -142,21 +221,18 @@ tone_stop() {
 		kill "$(cat "$TONE_PIDFILE")" 2>/dev/null || true
 		rm -f "$TONE_PIDFILE"
 	fi
-	# belt and suspenders
 	killall speaker-test 2>/dev/null || true
 }
 
 tone_play() { # channel
-	have speaker-test || return 0
+	have speaker-test || { warn "speaker-test missing"; return 1; }
 	tone_stop
-	ch="${1:-both}"
-	case "$ch" in
+	case "${1:-both}" in
 		left)  spk="-s1" ;;
 		right) spk="-s2" ;;
 		*)     spk="" ;;
 	esac
-	# Run in the background and self-terminate after ~4s so a tab close or a
-	# lost connection can never leave a tone stuck on.
+	# Self-terminates so a closed tab can't leave a tone stuck on.
 	(
 		speaker-test -D default -c2 -t pink $spk >/dev/null 2>&1 &
 		p=$!
@@ -167,13 +243,45 @@ tone_play() { # channel
 	) &
 }
 
+# --- introspection ----------------------------------------------------------
+# Reads back what the hardware ACTUALLY has set, so a mismatch between
+# intent and reality is visible instead of having to be inferred.
+ac97_reg() { [ -r "$AC97_REGS" ] && sed -n "s/^0:$1 = //p" "$AC97_REGS" | head -1; }
+
+simple_state() { # simple_state <control>
+	amixer -c "$CARD" sget "$1" 2>/dev/null |
+		sed -n 's/.*Playback \([0-9]*\) \[\([0-9]*%\)\].*\[\(on\|off\)\].*/\2 \3/p' | head -1
+}
+
+do_status() {
+	echo "master=$(simple_state Master)"
+	echo "front=$(simple_state Front)"
+	echo "pcm=$(simple_state PCM)"
+	echo "spdif_switch=$(amixer -c "$CARD" cget name="$SPDIF_SW" 2>/dev/null | sed -n 's/.*: values=//p' | head -1)"
+	echo "spdif_spsa=$(amixer -c "$CARD" cget name="$SPDIF_SPSA" 2>/dev/null | sed -n 's/.*: values=//p' | head -1)"
+	echo "ac97_master_02=$(ac97_reg 02)"
+	echo "ac97_pcm_18=$(ac97_reg 18)"
+	echo "ac97_powerdown_26=$(ac97_reg 26)"
+	echo "ac97_extaudio_2a=$(ac97_reg 2a)"
+	echo "ac97_dacrate_2c=$(ac97_reg 2c)"
+	echo "d2_fw_020004=$(d2_read 020004)"
+	echo "d2_config_020001=$(d2_read 020001)"
+	echo "d2_inputsel_020002=$(d2_read 020002)"
+	echo "d2_mastervol_000000=$(d2_read 000000)"
+	if [ -f "$LINEIN_PIDFILE" ] && kill -0 "$(cat "$LINEIN_PIDFILE")" 2>/dev/null; then
+		echo "linein=running"
+	else
+		echo "linein=stopped"
+	fi
+}
+
 case "${1:-}" in
-	init)      do_init ;;
-	output)    set_output "${2:-}" ;;
-	volume)    set_volume "${2:-0}" ;;
+	apply)     do_apply "${2:-off}" "${3:-media}" "${4:-0}" ;;
+	status)    do_status ;;
 	tone)      tone_play "${2:-both}" ;;
 	tone-stop) tone_stop ;;
-	*)         echo "usage: $0 {init|output ...|volume 0-100|tone ch|tone-stop}" >&2; exit 1 ;;
+	*)
+		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100>|status|tone <ch>|tone-stop}" >&2
+		exit 1
+		;;
 esac
-
-exit 0

@@ -76,9 +76,61 @@ if [ -f "$TARGET_DIR/etc/init.d/S10led-animation" ]; then
         chmod 0755 "$TARGET_DIR/etc/init.d/S10led-animation" || true
 fi
 
-if [ -f "$TARGET_DIR/etc/init.d/K99z-ep93xx-reset" ]; then
-        chmod 0755 "$TARGET_DIR/etc/init.d/K99z-ep93xx-reset" || true
-fi
 # so boot reflects the current defconfig package set.
 rm -f "$TARGET_DIR/usr/bin/example-daemon" || true
 rm -f "$TARGET_DIR/etc/init.d/S60example-daemon" || true
+
+# Man pages/docs are dead weight here: nothing on this headless device (no
+# `man` reader in our BusyBox config) ever reads them.
+rm -rf "$TARGET_DIR/usr/share/man" "$TARGET_DIR/usr/share/doc" || true
+
+# i2c-tools installs these unconditionally (no Kconfig option to skip them);
+# they're x86 DIMM-SPD/VAIO/monitor-DDC diagnostic tools, irrelevant on this
+# hardware. We only ever use i2ctransfer (speakerpoint-audio-apply) and keep
+# i2cdetect/i2cget/i2cset/i2cdump for manual debugging.
+for f in eeprog decode-dimms decode-vaio ddcmon decode-edid; do
+	rm -f "$TARGET_DIR/usr/bin/$f" "$TARGET_DIR/usr/sbin/$f" || true
+done
+rm -f "$TARGET_DIR/usr/sbin/i2c-stub-from-dump" || true
+
+# shairport-sync (AirPlay) needs a C++ toolchain to build, but with our
+# options (no convolution, no AirPlay 2, no Apple ALAC) it compiles no C++
+# and no longer links libstdc++ itself (see the shairport-sync --as-needed
+# patch). Buildroot's gcc-final.mk still unconditionally ships libstdc++.so
+# whenever C++ is toolchain-enabled at all, and libconfig's build similarly
+# ships libconfig++.so alongside the plain-C libconfig.so that shairport-sync
+# actually links. Prune each, in dependency order, only if nothing on the
+# rootfs actually references it - verified via real NEEDED entries, not
+# assumed.
+READELF="$(ls "$HOST_DIR"/bin/*-readelf 2>/dev/null | head -n1)"
+if [ -n "$READELF" ] && [ -x "$READELF" ]; then
+	prune_if_unused() {
+		lib_glob="$1"
+		soname="${lib_glob%.so\*}.so"
+		lib_path="$(ls "$TARGET_DIR"/usr/lib/$lib_glob 2>/dev/null | head -n1)"
+		[ -n "$lib_path" ] || return 0
+
+		needed_by=""
+		for f in $(find "$TARGET_DIR/usr/bin" "$TARGET_DIR/usr/sbin" \
+		                 "$TARGET_DIR/bin" "$TARGET_DIR/sbin" \
+		                 "$TARGET_DIR/usr/lib" "$TARGET_DIR/lib" \
+		                 -type f 2>/dev/null); do
+			[ "$f" = "$lib_path" ] && continue
+			if "$READELF" -d "$f" 2>/dev/null | grep -F "$soname" | grep -q NEEDED; then
+				needed_by="$needed_by $f"
+			fi
+		done
+
+		if [ -z "$needed_by" ]; then
+			rm -f "$TARGET_DIR"/usr/lib/$lib_glob
+			echo "info: removed unused $lib_glob from target"
+		else
+			warn "$lib_glob is dynamically needed by:$needed_by - keeping it"
+		fi
+	}
+
+	prune_if_unused "libconfig++.so*"
+	prune_if_unused "libstdc++.so*"
+else
+	warn "no cross readelf found under \$HOST_DIR/bin - leaving libstdc++/libconfig++ in place (unverified)"
+fi

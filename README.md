@@ -87,6 +87,34 @@ root
 speakerpoint
 ```
 
+## Automated flashing / netboot over RS232 (`spflash.py`)
+
+The manual RedBoot + TFTP dance above works, but `spflash.py` automates the
+whole thing over just the serial cable — no TFTP server or network setup. It
+drives the RedBoot console, transfers the images with YMODEM, and either boots
+from RAM or writes NOR flash.
+
+```sh
+python3 -m pip install -r requirements.txt   # pyserial
+
+# Boot the freshly built image from RAM (nothing written to flash):
+./spflash.py netboot
+
+# Permanently write kernel + rootfs to NOR flash:
+./spflash.py flash
+```
+
+It auto-detects the serial port (or pass `--port /dev/tty...`; use
+`--list-ports` to see candidates) and prompts you to power-cycle the unit so it
+can catch RedBoot's interrupt window automatically. YMODEM over 57600 baud is
+slow (~10 KiB/s), so a full flash of the rootfs takes a while — a progress bar
+shows the transfer.
+
+`netboot` uses `rootfs.cpio.gz` (RAM initramfs); `flash` uses
+`rootfs.squashfs` (mounted from flash). After `flash`, the tool prints the
+one remaining manual step: setting RedBoot's boot script via `fconfig` (left
+manual by design, since a bad boot script written blind can break auto-boot).
+
 ## Disclaimer
 
 This is not endorsed or authroized by Control4 Corporation. Control4 is a trademark of the Control4 Corporation. 
