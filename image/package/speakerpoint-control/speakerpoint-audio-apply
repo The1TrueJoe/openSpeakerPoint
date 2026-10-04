@@ -14,6 +14,10 @@
 #   speakerpoint-audio-apply status          machine-readable hardware state
 #   speakerpoint-audio-apply tone <ch>       pink noise (left|right|both)
 #   speakerpoint-audio-apply tone-stop
+#   speakerpoint-audio-apply capture         free + set up the line input for a
+#                                            measurement (stops the loopback,
+#                                            Line at 0 dB gain); the next
+#                                            `apply` puts the routing back
 #
 # Signal paths:
 #   RCA out : PCM -> STAC9758 analog DACs -> Master/Front -> RCA jacks
@@ -213,6 +217,19 @@ linein_start() {
 	) &
 }
 
+# --- line-in measurement ---------------------------------------------------
+# speakerpoint-control's measure_linein() records the line input itself; this
+# only gets the capture side ready. The loopback owns the capture device while
+# it runs, so it stops here, and the gain is pinned at 0 dB (the loopback uses
+# +18 dB) so a level reads the same from one measurement to the next. The
+# daemon re-runs `apply` afterwards, which restarts the loopback if line-in is
+# the selected source.
+do_capture() {
+	linein_stop
+	amix cset name="Capture Source" Line
+	amix sset Capture 0% cap
+}
+
 # --- test tones -------------------------------------------------------------
 TONE_PIDFILE=/var/run/speakerpoint-tone.pid
 
@@ -280,8 +297,9 @@ case "${1:-}" in
 	status)    do_status ;;
 	tone)      tone_play "${2:-both}" ;;
 	tone-stop) tone_stop ;;
+	capture)   do_capture ;;
 	*)
-		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100>|status|tone <ch>|tone-stop}" >&2
+		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100>|status|tone <ch>|tone-stop|capture}" >&2
 		exit 1
 		;;
 esac

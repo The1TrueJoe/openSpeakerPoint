@@ -1,8 +1,10 @@
 config BR2_PACKAGE_SPEAKERPOINT_CONTROL
 	bool "speakerpoint-control"
+	select BR2_PACKAGE_MOSQUITTO
 	help
-	  HTTP backend for the SpeakerPoint dashboard. Exposes JSON
+	  HTTP + MQTT control daemon for the SpeakerPoint. Exposes JSON
 	  endpoints for volume, output routing (RCA line-out vs. the
 	  powered D2 amplifier), test tones, and USB MP3 playback with
 	  ID3 metadata + album art. Drives the codec via ALSA, the amp
-	  over I2C, and plays media via MPD.
+	  over I2C, and plays media via MPD. Live controls and state are
+	  also on MQTT (libmosquitto), on the box's own broker.

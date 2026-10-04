@@ -1,9 +1,10 @@
 /*
- * speakerpoint-control - HTTP control daemon for the SpeakerPoint.
+ * speakerpoint-control - control daemon for the SpeakerPoint.
  *
  * Exposes audio routing/volume/test-tones and (via MPD) USB MP3 playback
  * with metadata and album art, over a small JSON API consumed by the React
- * dashboard.
+ * dashboard, and the live controls and state over MQTT on the box's own
+ * mosquitto (see mqtt.h for the topics).
  *
  *   GET  /api/health
  *   GET  /api/state                         { volume, output, source }
@@ -12,6 +13,7 @@
  *   POST /api/volume?value=0-100
  *   POST /api/tone?channel=&type=&freq=
  *   POST /api/tone/stop
+ *   GET  /api/audio/measure?seconds=1       line-in level + frequency (measure.h)
  *   GET  /api/now                           now-playing (media/airplay/linein)
  *   POST /api/transport?cmd=play|pause|stop|next|prev
  *   POST /api/seek?value=<seconds>
@@ -25,6 +27,8 @@
 #include "audio.h"
 #include "airplay.h"
 #include "httpio.h"
+#include "measure.h"
+#include "mqtt.h"
 #include "player.h"
 
 #include <errno.h>
@@ -267,18 +271,18 @@ static void dispatch(int fd, const http_request_t *r)
         return;
     }
 
+    if (is(r, "GET", "/api/audio/measure")) {
+        int secs = 1;
+        if (!http_query(r->query, "seconds", val, sizeof(val))) secs = atoi(val);
+        char body[512];
+        int rc = measure_linein(secs, body, sizeof(body));
+        http_send_json(fd, rc ? 500 : 200, rc ? "Error" : "OK", body);
+        return;
+    }
+
     if (is(r, "GET", "/api/now")) {
         char body[2048];
-        if (airplay_active()) {
-            airplay_now_json(body, sizeof(body));
-        } else if (!strcmp(audio_source(), "linein")) {
-            snprintf(body, sizeof(body),
-                     "{\"source\":\"linein\",\"state\":\"play\",\"file\":null,"
-                     "\"title\":null,\"artist\":null,\"album\":null,\"elapsed\":0,"
-                     "\"duration\":0,\"hasArt\":false}");
-        } else {
-            player_now_json(body, sizeof(body));
-        }
+        now_playing_json(body, sizeof(body));
         http_send_json(fd, 200, "OK", body);
         return;
     }
@@ -371,6 +375,7 @@ int main(void)
     audio_apply_startup();
     player_start();
     airplay_start();
+    mqtt_start();
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -400,10 +405,12 @@ int main(void)
     }
 
     while (keep_running) {
-        fd_set rfds;
+        fd_set rfds, wfds;
         FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
         FD_SET(server_fd, &rfds);
         int maxfd = server_fd;
+        maxfd = mqtt_fdset(&rfds, &wfds, maxfd);
 
         /* Optional media-engine fd, if it has one to watch. */
         int pfd = player_status_fd();
@@ -414,13 +421,16 @@ int main(void)
 
         /* 1s timeout so player_tick() runs even when nothing else happens. */
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-        int n = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        int n = select(maxfd + 1, &rfds, &wfds, NULL, &tv);
         if (n < 0) {
             if (errno == EINTR) continue;
             break;
         }
         player_tick();
+        mqtt_tick();
         if (n == 0) continue;   /* timeout only */
+
+        mqtt_service(&rfds, &wfds);
 
         if (pfd >= 0 && FD_ISSET(pfd, &rfds)) {
             player_poll();
@@ -476,6 +486,7 @@ int main(void)
                         handle_upload(client_fd, &req, req_buf, nread);
                     } else {
                         dispatch(client_fd, &req);
+                        mqtt_sync();   /* a REST change shows on MQTT at once */
                     }
                 } else {
                     http_send_json(client_fd, 400, "Bad Request", "{\"ok\":false}");
@@ -485,6 +496,7 @@ int main(void)
         }
     }
 
+    mqtt_stop();
     close(server_fd);
     return 0;
 }

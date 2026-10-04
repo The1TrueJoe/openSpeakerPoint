@@ -7,10 +7,13 @@
 
 void audio_load(void);              /* read persisted state */
 void audio_apply_startup(void);     /* init hardware + push saved state */
+void audio_reapply(void);           /* push the current state again (e.g. after a measurement borrowed the codec) */
 
 bool audio_valid_output(const char *mode);
 void audio_set_output(const char *mode);
 void audio_set_volume(int volume);  /* clamped 0-100 */
+const char *audio_output(void);
+int audio_volume(void);
 
 /* Active input source feeding the output: "media" (USB via MPD) or "linein"
  * (external line-in loopback). Exclusive - selecting one stops the other. */

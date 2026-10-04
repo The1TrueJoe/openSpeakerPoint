@@ -10,6 +10,7 @@
  */
 #include "player.h"
 #include "airplay.h"
+#include "audio.h"
 #include "jsonutil.h"
 
 #include <arpa/inet.h>
@@ -364,6 +365,20 @@ int player_delete_track(const char *path)
 /* ------------------------------------------------------------------ */
 /* Status / library                                                   */
 /* ------------------------------------------------------------------ */
+void now_playing_json(char *out, size_t out_len)
+{
+    if (airplay_active()) {
+        airplay_now_json(out, out_len);
+    } else if (!strcmp(audio_source(), "linein")) {
+        snprintf(out, out_len,
+                 "{\"source\":\"linein\",\"state\":\"play\",\"file\":null,"
+                 "\"title\":null,\"artist\":null,\"album\":null,\"elapsed\":0,"
+                 "\"duration\":0,\"hasArt\":false}");
+    } else {
+        player_now_json(out, out_len);
+    }
+}
+
 void player_now_json(char *out, size_t out_len)
 {
     conn_t c;

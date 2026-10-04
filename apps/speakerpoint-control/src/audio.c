@@ -40,6 +40,16 @@ const char *audio_source(void)
     return s_source;
 }
 
+const char *audio_output(void)
+{
+    return s_output;
+}
+
+int audio_volume(void)
+{
+    return s_volume;
+}
+
 static void run_apply(const char *fmt, ...)
 {
     char cmd[256];
@@ -92,6 +102,11 @@ void audio_load(void)
 }
 
 void audio_apply_startup(void)
+{
+    apply_all();
+}
+
+void audio_reapply(void)
 {
     apply_all();
 }
