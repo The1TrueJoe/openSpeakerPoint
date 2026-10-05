@@ -21,10 +21,11 @@ CONFIG_SND_SOC_SPEAKERPOINT=y
 # The flash layout (mtd1..mtd9; mtd0 is the whole chip). Stock's RedBoot,
 # kernel, cramfs and FIS directory are read-only; openSpeakerPoint's kernel,
 # rootfs, stock-restore payload and data sit in stock's old jffs2.img region plus
-# the unallocated 256 KiB after it; RedBoot-config stays writable for install
+# the unallocated 256 KiB after it (osp-data is 6 blocks: jffs2 refuses fewer
+# than 5, "Too few erase blocks"); RedBoot-config stays writable for install
 # and restore. Kept here rather than in the device tree, whose size is critical
 # on this board (see the board .dts). Appended on a netboot too (CMDLINE_EXTEND).
-CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5 mtdparts=60000000.flash:256k(RedBoot)ro,1m(stock-zImage)ro,5376k(stock-cramfs)ro,2m(osp-kernel),4608k(osp-rootfs),2304k(osp-restore),512k(osp-data),128k(RedBoot-config),128k(FIS-directory)ro"
+CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5 mtdparts=60000000.flash:256k(RedBoot)ro,1m(stock-zImage)ro,5376k(stock-cramfs)ro,2m(osp-kernel),4480k(osp-rootfs),2176k(osp-restore),768k(osp-data),128k(RedBoot-config),128k(FIS-directory)ro"
 CONFIG_CMDLINE_EXTEND=y
 
 # devtmpfs so /dev is populated without a static device table.

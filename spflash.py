@@ -54,7 +54,7 @@ NOR_SIZE = 0x1000000
 STOCK_JFFS2_OFF, STOCK_JFFS2_LEN = 0x680000, 0x900000
 REDBOOT_CFG_OFF = 0xFC0000
 KERNEL_SLOT = 0x200000          # osp-kernel
-RESTORE_SLOT = 0x240000         # osp-restore
+RESTORE_SLOT = 0x220000         # osp-restore
 JFFS2_IMG_RAM = 0x01500000      # where `fis load jffs2.img` puts the region (its FIS mem_base)
 # Regions an install must leave exactly as stock had them.
 STOCK_FIXED = {"RedBoot": (0x000000, 0x040000), "zImage": (0x040000, 0x100000),
@@ -63,9 +63,10 @@ BOOT_CMDLINE = f"{CONSOLE} root=/dev/mtdblock5 rootfstype=squashfs ro panic=5"
 BOOT_SCRIPT = ["fis load jffs2.img",
                f'exec -b 0x{JFFS2_IMG_RAM:08x} -l 0x{KERNEL_SLOT:x} -c "{BOOT_CMDLINE}"']
 OSP_PASSWORD = "speakerpoint"
-# xz settings for the stock payload: a 2 MiB dictionary keeps decompression
-# on the 32 MiB box to ~3 MiB of RAM (xz's default 64 MiB would not fit).
-XZ_FILTERS = [{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME, "dict_size": 2 << 20}]
+# xz settings for the stock payload: a 4 MiB dictionary keeps decompression
+# on the 32 MiB box to ~5 MiB of RAM (xz's default 64 MiB would not fit) and the
+# payload clear of its 17-block partition.
+XZ_FILTERS = [{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME, "dict_size": 4 << 20}]
 
 # YMODEM control bytes
 SOH, STX, EOT, ACK, NAK, CAN, CRCCHAR = 0x01, 0x02, 0x04, 0x06, 0x15, 0x18, 0x43
@@ -544,9 +545,17 @@ def do_install(ser, images: str, backups: str, host: str = None):
     print("   ", BOOT_SCRIPT[1])
     rb.ser.write(BOOT_SCRIPT[1].encode() + b"\r\n")
     con.wait_login(timeout=600)    # a first boot also generates SSH host keys
-    con.login()
-    if con.run("awk '$2 == \"/\" { print $3 }' /proc/mounts | tail -n 1") != "squashfs":
-        sys.exit("error: the test boot did not come up from flash")
+    for _ in range(60):            # sshd comes up after the getty prompt
+        try:
+            if Box(ip).booted_from_flash():
+                break
+            sys.exit("error: the test boot did not come up from flash")
+        except Exception as e:     # connection refused, or paramiko's SSHException mid key-generation
+            if isinstance(e, SystemExit):
+                raise
+            time.sleep(10)
+    else:
+        sys.exit("error: no SSH after the test boot")
     print("  Booted from flash.")
 
     print("\n== Saving RedBoot's boot script ==")

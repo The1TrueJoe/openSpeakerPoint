@@ -143,9 +143,9 @@ and the 256 KiB after it become:
 | Partition | Size | Holds |
 |---|---|---|
 | `osp-kernel` | 2 MiB | the kernel |
-| `osp-rootfs` | 4.5 MiB | squashfs root (`/dev/mtdblock5`) |
-| `osp-restore` | 2.25 MiB | stock's jffs2 files (xz) and its RedBoot config block |
-| `osp-data` | 512 KiB | jffs2 for settings (`/data`) |
+| `osp-rootfs` | 4.375 MiB | squashfs root (`/dev/mtdblock5`) |
+| `osp-restore` | 2.125 MiB | stock's jffs2 files (xz) and its RedBoot config block |
+| `osp-data` | 768 KiB | jffs2 for settings and SSH host keys (`/data`) |
 
 RedBoot's FIS directory stays stock: the boot script becomes
 `fis load jffs2.img` plus an `exec` of the kernel at the start of that region.
