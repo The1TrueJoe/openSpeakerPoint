@@ -1,21 +1,43 @@
 #!/bin/sh
-# Set the runtime hostname to speakerpoint-<mac>, so units are distinguishable
-# in `hostname`, syslog, and (shairport-sync defaults its AirPlay name to the
-# hostname when unconfigured) the AirPlay device picker. eth0's MAC is
-# available in sysfs immediately, no DHCP wait needed. Runs at S05, before
-# networking and well before shairport-sync's S99, so both DHCP and AirPlay
-# see it from boot. Only sets the runtime hostname (sethostname); the
-# build-time "speakerpoint" in /etc/hostname stays as a static fallback.
+# The unit's identity: its real MAC on eth0, and hostname speakerpoint-<mac>.
+#
+# The MAC Control4 assigned this unit (the one on its label, and what stock
+# uses) lives in the I2C EEPROM at 0x50, 6 bytes at offset 0x0B50 with 16-bit
+# addressing - the same read stock's /usr/bin/eeprom -b does. RedBoot's own
+# ESA, which the kernel would otherwise use, is not unit-specific. Setting it
+# here, before networking (S40), keeps DHCP leases and mDNS/MQTT names the same
+# as stock's and unique per unit. Unreadable or not a plausible unicast MAC:
+# eth0 keeps what it has and the name follows that.
+#
+# Hostname only at runtime (sethostname); /etc/hostname's "speakerpoint" stays
+# as the build-time fallback. shairport-sync names itself after the hostname.
 
-MAC_FILE=/sys/class/net/eth0/address
+EEPROM_BUS=0
+EEPROM_ADDR=0x50
+
+eeprom_mac() {
+	command -v i2ctransfer >/dev/null 2>&1 || return 1
+	b=$(i2ctransfer -y "$EEPROM_BUS" w2@"$EEPROM_ADDR" 0x0b 0x50 r6@"$EEPROM_ADDR" 2>/dev/null) || return 1
+	set -- $b
+	[ $# -eq 6 ] || return 1
+	mac=$(printf '%02x:%02x:%02x:%02x:%02x:%02x' "$1" "$2" "$3" "$4" "$5" "$6") || return 1
+	case "$mac" in
+		ff:ff:ff:ff:ff:ff|00:00:00:00:00:00) return 1 ;;
+	esac
+	# A multicast bit set means this is not a MAC at all.
+	[ $(( $1 & 1 )) -eq 0 ] || return 1
+	echo "$mac"
+}
 
 case "$1" in
 start)
-	if [ -r "$MAC_FILE" ]; then
-		mac="$(cat "$MAC_FILE" 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')"
-		if [ -n "$mac" ] && [ "$mac" != "000000000000" ]; then
-			hostname "speakerpoint-$mac"
-		fi
+	if mac=$(eeprom_mac); then
+		ip link set dev eth0 down 2>/dev/null
+		ip link set dev eth0 address "$mac" && echo "eth0: unit MAC $mac (EEPROM)"
+	fi
+	m=$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')
+	if [ -n "$m" ] && [ "$m" != "000000000000" ]; then
+		hostname "speakerpoint-$m"
 	fi
 	;;
 stop)
