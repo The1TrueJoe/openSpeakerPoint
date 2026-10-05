@@ -1,39 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import type { DeviceState, OutputMode, SourceMode } from "@/lib/types";
+import { command, deviceState, useSnapshot } from "@/lib/mqtt";
+import type { OutputMode, SourceMode } from "@/lib/types";
 
-/** Audio routing + source + volume state, with optimistic updates on control. */
+/** Audio routing + source + volume, live over MQTT (retained state; no polling). */
 export function useDevice() {
-  const qc = useQueryClient();
-
-  const state = useQuery({
-    queryKey: ["state"],
-    queryFn: api.getState,
-    refetchInterval: 10_000,
-  });
-
-  const setState = (next: DeviceState) => qc.setQueryData(["state"], next);
-
-  const output = useMutation({
-    mutationFn: (value: OutputMode) => api.setOutput(value),
-    onSuccess: setState,
-  });
-
-  const source = useMutation({
-    mutationFn: (value: SourceMode) => api.setSource(value),
-    onSuccess: (next) => {
-      setState(next);
-      /* Now-playing is derived from the active source, so refresh it
-       * immediately rather than leaving the hero showing the old source
-       * until the next poll comes around. */
-      qc.invalidateQueries({ queryKey: ["now"] });
-    },
-  });
-
-  const volume = useMutation({
-    mutationFn: (value: number) => api.setVolume(value),
-    onSuccess: setState,
-  });
-
-  return { state, output, source, volume, setState };
+  const s = useSnapshot();
+  const data = deviceState(s);
+  return {
+    state: { data, isSuccess: s.online && data !== undefined },
+    output: { mutate: (value: OutputMode) => command("audio/output", value), isPending: false },
+    source: { mutate: (value: SourceMode) => command("audio/source", value), isPending: false },
+    volume: { mutate: (value: number) => command("audio/volume", Math.round(value)), isPending: false },
+  };
 }

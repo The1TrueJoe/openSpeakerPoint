@@ -1,0 +1,52 @@
+#!/bin/sh
+# osp-flash - write openSpeakerPoint's own flash partitions (see the board .dts).
+#
+#   osp-flash write <label> <file>   erase + write + verify one partition
+#   osp-flash format-data            empty jffs2 on osp-data
+#   osp-flash layout                 the partition table, by label
+#
+# Used by `spflash.py install` from a netbooted (RAM) system, where nothing is
+# running from flash. Only openSpeakerPoint's partitions are accepted: stock's
+# are read-only in the device tree anyway, and RedBoot-config is written only
+# by RedBoot itself (install) and by osp-restore (stock's own block).
+
+set -eu
+
+say() { echo "osp-flash: $*"; }
+die() { echo "osp-flash: ERROR: $*" >&2; exit 1; }
+
+mtd_of() { sed -n "s/^\(mtd[0-9]*\): .* \"$1\"\$/\1/p" /proc/mtd | head -n 1; }
+
+case "${1:-}" in
+	write)
+		label="${2:-}"; file="${3:-}"
+		case "$label" in
+			osp-kernel|osp-rootfs|osp-restore) ;;
+			*) die "refusing to write '$label' (osp-kernel|osp-rootfs|osp-restore only)" ;;
+		esac
+		[ -f "$file" ] || die "no such file: $file"
+		m=$(mtd_of "$label"); [ -n "$m" ] || die "no $label partition"
+		size=$(cat "/sys/class/mtd/$m/size")
+		len=$(wc -c < "$file")
+		[ "$len" -le "$size" ] || die "$file is $len bytes; $label holds $size"
+		# flashcp erases what it needs, writes, and reads back to verify.
+		flashcp "$file" "/dev/$m" || die "flashcp to $label failed"
+		want=$(md5sum < "$file" | cut -d' ' -f1)
+		got=$(head -c "$len" "/dev/$m" | md5sum | cut -d' ' -f1)
+		[ "$got" = "$want" ] || die "$label reads back $got, expected $want"
+		say "$label: $len bytes written and verified ($want)"
+		;;
+	format-data)
+		m=$(mtd_of osp-data); [ -n "$m" ] || die "no osp-data partition"
+		grep -q " /data " /proc/mounts && die "/data is mounted"
+		flash_erase -q -j "/dev/$m" 0 0
+		say "osp-data: empty jffs2"
+		;;
+	layout)
+		cat /proc/mtd
+		;;
+	*)
+		echo "usage: $0 {write <osp-kernel|osp-rootfs|osp-restore> <file>|format-data|layout}" >&2
+		exit 2
+		;;
+esac

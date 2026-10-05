@@ -1,33 +1,19 @@
 /*
  * speakerpoint-control - control daemon for the SpeakerPoint.
  *
- * Exposes audio routing/volume/test-tones and (via MPD) USB MP3 playback
- * with metadata and album art, over a small JSON API consumed by the React
- * dashboard, and the live controls and state over MQTT on the box's own
- * mosquitto (see mqtt.h for the topics).
+ * Controls and live state are on MQTT, on the box's own mosquitto (mqtt.h);
+ * HTTP keeps only what MQTT carries badly, for the React dashboard:
  *
  *   GET  /api/health
- *   GET  /api/state                         { volume, output, source }
- *   POST /api/output?value=off|rca|amp|both
- *   POST /api/source?value=media|linein
- *   POST /api/volume?value=0-100
- *   POST /api/tone?channel=&type=&freq=
- *   POST /api/tone/stop
- *   GET  /api/audio/measure?seconds=1       line-in level + frequency (measure.h)
- *   GET  /api/now                           now-playing (media/airplay/linein)
- *   POST /api/transport?cmd=play|pause|stop|next|prev
- *   POST /api/seek?value=<seconds>
- *   GET  /api/library                       USB media library
- *   POST /api/play?index=<n>
- *   POST /api/rescan
- *   POST /api/delete?file=<path>
+ *   GET  /api/audio/status                  hardware readback (diagnostic text)
+ *   GET  /api/library                       USB media library (re-fetched when
+ *                                           MQTT state/library's rev changes)
  *   POST /api/upload?name=<f>               raw-body MP3 upload to USB
  *   GET  /api/albumart?file=<uri>           image bytes
  */
 #include "audio.h"
 #include "airplay.h"
 #include "httpio.h"
-#include "measure.h"
 #include "mqtt.h"
 #include "player.h"
 
@@ -204,13 +190,6 @@ static void dispatch(int fd, const http_request_t *r)
         return;
     }
 
-    if (is(r, "GET", "/api/state")) {
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
     /* Actual hardware readback (mixer + AC97 + D2 amp registers), so a
      * mismatch between what we asked for and what the chips have is
      * directly visible instead of having to be inferred. */
@@ -218,91 +197,6 @@ static void dispatch(int fd, const http_request_t *r)
         char body[2048];
         audio_status_text(body, sizeof(body));
         http_send_binary(fd, "text/plain", body, strlen(body));
-        return;
-    }
-
-    if (is(r, "POST", "/api/output")) {
-        if (http_query(r->query, "value", val, sizeof(val)) || !audio_valid_output(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad output\"}");
-            return;
-        }
-        audio_set_output(val);
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/volume")) {
-        if (http_query(r->query, "value", val, sizeof(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"missing value\"}");
-            return;
-        }
-        audio_set_volume(atoi(val));
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/source")) {
-        if (http_query(r->query, "value", val, sizeof(val)) || !audio_valid_source(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad source\"}");
-            return;
-        }
-        audio_set_source(val);
-        char body[160];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/tone")) {
-        char ch[16] = "both";
-        http_query(r->query, "channel", ch, sizeof(ch));
-        audio_tone(ch);
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/tone/stop")) {
-        audio_tone_stop();
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "GET", "/api/audio/measure")) {
-        int secs = 1;
-        if (!http_query(r->query, "seconds", val, sizeof(val))) secs = atoi(val);
-        char body[512];
-        int rc = measure_linein(secs, body, sizeof(body));
-        http_send_json(fd, rc ? 500 : 200, rc ? "Error" : "OK", body);
-        return;
-    }
-
-    if (is(r, "GET", "/api/now")) {
-        char body[2048];
-        now_playing_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/transport")) {
-        if (http_query(r->query, "cmd", val, sizeof(val)) || player_transport(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"transport failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/seek")) {
-        if (http_query(r->query, "value", val, sizeof(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"missing value\"}");
-            return;
-        }
-        player_seek(atoi(val));
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
         return;
     }
 
@@ -315,30 +209,6 @@ static void dispatch(int fd, const http_request_t *r)
         player_library_json(body, LIBRARY_BUF_SIZE);
         http_send_json(fd, 200, "OK", body);
         free(body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/play")) {
-        if (http_query(r->query, "index", val, sizeof(val)) || player_play_index(atoi(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"play failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/rescan")) {
-        player_rescan();
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/delete")) {
-        if (http_query(r->query, "file", val, sizeof(val)) || player_delete_track(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"delete failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
         return;
     }
 

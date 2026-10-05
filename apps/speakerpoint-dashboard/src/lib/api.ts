@@ -1,17 +1,10 @@
-import type {
-  DeviceState,
-  Library,
-  NowPlaying,
-  OutputMode,
-  PlaybackState,
-  SourceMode,
-  ToneChannel,
-} from "./types";
+import type { Library } from "./types";
 
 /**
- * The control daemon listens on :8081; the dashboard is served by httpd on :80.
- * Derive the API origin from the page host so it works regardless of the
- * device's IP.
+ * REST is only for what MQTT carries badly (see lib/mqtt.ts for everything
+ * else): the library listing, uploads and album-art bytes. The control daemon
+ * listens on :8081; the dashboard is served by httpd on :80, so the API origin
+ * comes from the page host.
  */
 const API_BASE = `${window.location.protocol}//${window.location.hostname}:8081`;
 
@@ -24,26 +17,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : {}) as T;
 }
 
-const post = (path: string) => request<{ ok: boolean }>(path, { method: "POST" });
-
 export const api = {
-  getState: () => request<DeviceState>("/api/state"),
-  setOutput: (value: OutputMode) => request<DeviceState>(`/api/output?value=${value}`, { method: "POST" }),
-  setSource: (value: SourceMode) => request<DeviceState>(`/api/source?value=${value}`, { method: "POST" }),
-  setVolume: (value: number) =>
-    request<DeviceState>(`/api/volume?value=${Math.round(value)}`, { method: "POST" }),
-
-  playTone: (channel: ToneChannel) => post(`/api/tone?channel=${channel}&type=pink`),
-  stopTone: () => post("/api/tone/stop"),
-
-  getNowPlaying: () => request<NowPlaying>("/api/now"),
-  transport: (cmd: PlaybackState | "next" | "prev") => post(`/api/transport?cmd=${cmd}`),
-  seek: (seconds: number) => post(`/api/seek?value=${Math.round(seconds)}`),
-
   getLibrary: () => request<Library>("/api/library"),
-  playTrack: (index: number) => post(`/api/play?index=${index}`),
-  rescan: () => post("/api/rescan"),
-  deleteTrack: (file: string) => post(`/api/delete?file=${encodeURIComponent(file)}`),
 
   /** XHR (not fetch) so we get real upload progress events. */
   uploadWithProgress: (file: File, onProgress: (pct: number) => void) =>

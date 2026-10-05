@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
 import { Activity, Square } from "lucide-react";
 import { Card } from "./ui/Card";
-import { api } from "@/lib/api";
+import { command } from "@/lib/mqtt";
 import { cn } from "@/lib/utils";
 import type { ToneChannel } from "@/lib/types";
 
@@ -15,14 +14,19 @@ const CHANNELS: { id: ToneChannel; label: string }[] = [
 export function TestTonePanel() {
   const [active, setActive] = useState<ToneChannel | null>(null);
 
-  const play = useMutation({
-    mutationFn: (channel: ToneChannel) => api.playTone(channel),
-    onMutate: (channel) => setActive(channel),
-  });
-  const stop = useMutation({
-    mutationFn: () => api.stopTone(),
-    onSettled: () => setActive(null),
-  });
+  const play = {
+    mutate: (channel: ToneChannel) => {
+      setActive(channel);
+      command("tone", channel);
+    },
+    isPending: false,
+  };
+  const stop = {
+    mutate: () => {
+      command("tone", "stop");
+      setActive(null);
+    },
+  };
 
   return (
     <Card title="Test Tones" icon={<Activity className="h-4 w-4" />}>

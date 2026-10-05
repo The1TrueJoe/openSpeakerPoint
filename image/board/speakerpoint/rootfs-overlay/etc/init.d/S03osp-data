@@ -1,0 +1,31 @@
+#!/bin/sh
+# /data: openSpeakerPoint's persistent settings, on the osp-data jffs2.
+#
+# Only when this system was booted from flash (an install: root is osp-rootfs).
+# A netbooted RAM system may be running on a box that is still stock, where
+# osp-data's blocks belong to stock's jffs2 - so there /data is plain tmpfs and
+# the flash is never touched. On an install, a partition that will not mount
+# (first boot, or damage) is formatted rather than leaving the box without
+# settings.
+
+mtd_of() { sed -n "s/^\(mtd[0-9]*\): .* \"$1\"\$/\1/p" /proc/mtd | head -n 1; }
+
+case "$1" in
+start)
+	mkdir -p /data
+	m=$(mtd_of osp-data)
+	if grep -q "root=/dev/mtdblock" /proc/cmdline && [ -n "$m" ]; then
+		dev="/dev/mtdblock${m#mtd}"
+		if ! mount -t jffs2 "$dev" /data 2>/dev/null; then
+			echo "osp-data: formatting $m"
+			flash_erase -q -j "/dev/$m" 0 0 && mount -t jffs2 "$dev" /data
+		fi
+	fi
+	grep -q " /data " /proc/mounts || mount -t tmpfs -o size=1m tmpfs /data
+	;;
+stop)
+	sync
+	umount /data 2>/dev/null
+	;;
+esac
+exit 0

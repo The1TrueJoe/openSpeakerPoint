@@ -30,7 +30,29 @@ static struct {
     char source[8];
     int volume;
     char now[2048];
+    char library[128];
+    char restore[160];
 } s_last;
+static time_t s_restore_checked;
+
+#define RESTORE_BIN "/usr/sbin/osp-restore"
+#define RESTORE_RECHECK 300
+
+/* {available, state} from `osp-restore status` (reads only the payload's
+ * manifest). Rechecked every few minutes: it changes only on an install. */
+static void restore_state_json(char *out, size_t len)
+{
+    char line[160] = "";
+    FILE *p = popen(RESTORE_BIN " status 2>/dev/null | grep '^state: '", "r");
+    if (p) {
+        if (!fgets(line, sizeof(line), p)) line[0] = '\0';
+        pclose(p);
+    }
+    line[strcspn(line, "\n")] = '\0';
+    const char *st = !strncmp(line, "state: ", 7) ? line + 7 : "none";
+    int ready = !strncmp(st, "ready", 5);
+    snprintf(out, len, "{\"available\":%s,\"state\":\"%s\"}", ready ? "true" : "false", st);
+}
 
 static const char *env_or(const char *k, const char *d)
 {
@@ -79,6 +101,21 @@ static void publish_changed(void)
     if (!s_last.valid || strcmp(now, s_last.now)) {
         publish("state/now", now, 1);
         snprintf(s_last.now, sizeof(s_last.now), "%s", now);
+    }
+    char lib[sizeof(s_last.library)];
+    player_library_state_json(lib, sizeof(lib));
+    if (!s_last.valid || strcmp(lib, s_last.library)) {
+        publish("state/library", lib, 1);
+        snprintf(s_last.library, sizeof(s_last.library), "%s", lib);
+    }
+    if (!s_last.valid || time(NULL) - s_restore_checked >= RESTORE_RECHECK) {
+        char rs[sizeof(s_last.restore)];
+        restore_state_json(rs, sizeof(rs));
+        s_restore_checked = time(NULL);
+        if (!s_last.valid || strcmp(rs, s_last.restore)) {
+            publish("state/system/restore", rs, 1);
+            snprintf(s_last.restore, sizeof(s_last.restore), "%s", rs);
+        }
     }
     s_last.valid = 1;
 }
@@ -148,6 +185,25 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
         audio_set_volume(atoi(val));
     } else if (!strcmp(cmd, "transport")) {
         if (player_transport(val)) { publish_error(msg->topic, "expected play|pause|stop|next|prev"); return; }
+    } else if (!strcmp(cmd, "seek")) {
+        if (!is_int(val)) { publish_error(msg->topic, "expected seconds"); return; }
+        player_seek(atoi(val));
+    } else if (!strcmp(cmd, "play")) {
+        if (!is_int(val) || player_play_index(atoi(val))) { publish_error(msg->topic, "expected a library index"); return; }
+    } else if (!strcmp(cmd, "library/rescan")) {
+        player_rescan();
+    } else if (!strcmp(cmd, "library/delete")) {
+        char path[512];
+        payload_str(msg, path, sizeof(path));
+        if (player_delete_track(path)) { publish_error(msg->topic, "delete failed"); return; }
+    } else if (!strcmp(cmd, "system/restore")) {
+        /* Acted on only for the literal "confirm": it wipes openSpeakerPoint.
+         * osp-restore hands itself to a RAM phase and resets the box, so it
+         * is started detached and this daemon is stopped along the way. */
+        if (strcmp(val, "confirm")) { publish_error(msg->topic, "send \"confirm\" to return to stock"); return; }
+        publish("event/system/restore", "{\"started\":true}", 0);
+        (void)system("setsid " RESTORE_BIN " stock --yes </dev/null >/dev/null 2>&1 &");
+        return;
     } else if (!strcmp(cmd, "tone")) {
         if (!strcmp(val, "stop")) {
             audio_tone_stop();

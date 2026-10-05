@@ -1,10 +1,8 @@
-# Fragment on top of the in-tree "ep93xx" defconfig, which already
-# builds in MTD + CFI Intel + the RedBoot partition parser (the stock
-# board has Intel JS28F128 CFI NOR flash with a RedBoot partition
-# table - see Research/Speakerpoint/Notes.txt). Partitions are
-# discovered at runtime from the on-flash FIS directory (DT
-# "redboot-fis" node in the board .dts), matching the stock kernel's
-# root=/dev/mtdblock3.
+# Fragment on top of the in-tree "ep93xx" defconfig. The board has an Intel
+# JS28F128 CFI NOR with stock's RedBoot partition table; the kernel uses fixed
+# DT partitions instead (board .dts), which keep stock's regions read-only and
+# give openSpeakerPoint its own kernel/rootfs/restore/data inside stock's old
+# jffs2.img region. Root is /dev/mtdblock5 (osp-rootfs).
 #
 # Modules are disabled to keep the image self-contained and bootable.
 # CONFIG_MODULES=y was confirmed to cause completely silent boot failure on
@@ -20,20 +18,23 @@ CONFIG_SND_SOC_SPEAKERPOINT=y
 
 # Provide a safe fallback rootfs cmdline for manual `exec` boot while also
 # pinning serial console speed to match RedBoot/getty.
-CONFIG_CMDLINE="root=/dev/mtdblock3 ro rootfstype=squashfs console=ttyAM0,57600"
+CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5"
 CONFIG_CMDLINE_EXTEND=y
 
 # devtmpfs so /dev is populated without a static device table.
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 
-# Root filesystem: read-only squashfs on mtdblock3 (ep93xx_defconfig
-# only enables jffs2/ext/nfs by default).
+# Root filesystem: read-only squashfs on mtdblock5, osp-rootfs (see the
+# board .dts; ep93xx_defconfig only enables jffs2/ext/nfs by default).
 CONFIG_MTD=y
 CONFIG_MTD_BLOCK=y
 CONFIG_MTD_CFI=y
 CONFIG_MTD_CFI_INTELEXT=y
 CONFIG_MTD_PHYSMAP=y
+# The DT binding for a "cfi-flash" node. Without it nothing claims the NOR at
+# all and /proc/mtd is empty, which is how the first images booted.
+CONFIG_MTD_PHYSMAP_OF=y
 CONFIG_MTD_REDBOOT_PARTS=y
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_XZ=y
@@ -236,3 +237,23 @@ CONFIG_ARM_UNWIND=n
 # the Buildroot-level BR2_LINUX_KERNEL_XZ option in the defconfig, not
 # a kernel Kconfig fragment symbol - Buildroot force-overwrites
 # CONFIG_KERNEL_* here regardless of what a fragment says.
+
+# --- flash: openSpeakerPoint's partitions + jffs2 stock can read -------------
+# The NOR is split by fixed DT partitions (see the board .dts): stock's
+# RedBoot, kernel, cramfs and FIS directory read-only, openSpeakerPoint's
+# kernel/rootfs/restore/data inside stock's old jffs2.img region. The whole
+# chip is also exposed (mtd0) for osp-restore, which re-creates that region.
+CONFIG_MTD_PARTITIONED_MASTER=y
+CONFIG_MTD_OF_PARTS=y
+# osp-data is jffs2, and osp-restore re-creates STOCK's jffs2 with it, which
+# the stock 2.4.21 kernel must then read. So only what 2.4 understands: zlib
+# and rtime nodes, no LZO, no summary nodes, no xattrs.
+CONFIG_JFFS2_FS=y
+CONFIG_JFFS2_FS_WRITEBUFFER=y
+CONFIG_JFFS2_ZLIB=y
+CONFIG_JFFS2_RTIME=y
+# CONFIG_JFFS2_LZO is not set
+# CONFIG_JFFS2_RUBIN is not set
+# CONFIG_JFFS2_SUMMARY is not set
+# CONFIG_JFFS2_FS_XATTR is not set
+# CONFIG_JFFS2_COMPRESSION_OPTIONS is not set

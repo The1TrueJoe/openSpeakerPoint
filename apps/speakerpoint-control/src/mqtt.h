@@ -1,4 +1,9 @@
-/* MQTT control for the SpeakerPoint, on the box's own mosquitto.
+/* MQTT: the SpeakerPoint's control channel, on the box's own mosquitto.
+ *
+ * Everything you control or watch goes here; HTTP (main.c) keeps only what
+ * MQTT carries badly - file upload, album-art bytes, the library listing - the
+ * same split openHC makes (MQTT for live state and control, REST for bulk and
+ * rarely-changing data).
  *
  * Same conventions as openHC: everything hangs off <prefix>/<hostname>
  * (prefix "openspeakerpoint" unless SPK_MQTT_PREFIX says otherwise):
@@ -8,13 +13,23 @@
  *   <base>/state/audio/source      media|linein              (retained)
  *   <base>/state/audio/volume      0-100                     (retained)
  *   <base>/state/now               now-playing JSON          (retained)
+ *   <base>/state/library           {usb, updating, rev}      (retained; re-fetch
+ *                                  GET /api/library when rev changes)
+ *   <base>/state/system/restore    {available, state}        (retained)
  *   <base>/cmd/audio/output        off|rca|amp|both
  *   <base>/cmd/audio/source        media|linein
  *   <base>/cmd/audio/volume        0-100
  *   <base>/cmd/transport           play|pause|stop|next|prev
+ *   <base>/cmd/seek                seconds
+ *   <base>/cmd/play                library index
+ *   <base>/cmd/library/rescan      (any payload)
+ *   <base>/cmd/library/delete      absolute /media/usb path
  *   <base>/cmd/tone                left|right|both|stop
  *   <base>/cmd/audio/measure       seconds (1-10, default 1) -> event/audio/measure
+ *   <base>/cmd/system/restore      confirm  -> back to stock Control4 (one-way;
+ *                                  osp-restore, the box reboots)
  *   <base>/event/audio/measure     line-in measurement JSON  (not retained)
+ *   <base>/event/system/restore    {started}                 (not retained)
  *   <base>/error                   {topic, message}          (not retained)
  *
  * State is retained so a client that connects late is told the truth at once;

@@ -115,13 +115,76 @@
 };
 
 &ebi {
+	/*
+	 * 16 MiB Intel JS28F128 NOR, 128 x 128 KiB blocks. Stock's own layout
+	 * (RedBoot's FIS directory) is: RedBoot, zImage, cramfs, a 9 MiB
+	 * jffs2.img holding Control4's /etc, packages and modules, 256 KiB
+	 * unallocated, RedBoot config, FIS directory.
+	 *
+	 * openSpeakerPoint keeps stock's RedBoot, kernel, cramfs and FIS
+	 * directory byte-for-byte (read-only here, so nothing can write them)
+	 * and lives in jffs2.img + the unallocated space. RedBoot still loads
+	 * it with `fis load jffs2.img` - the FIS directory is never edited - and
+	 * the boot script execs the kernel at the start of that region.
+	 *
+	 * Stock's jffs2 contents are kept, compressed, in osp-restore, which is
+	 * what lets the box put itself back to stock (osp-restore stock) with
+	 * nothing but its own flash. Partition numbers matter: mtd0 is the
+	 * whole chip (CONFIG_MTD_PARTITIONED_MASTER), so these are mtd1..mtd9
+	 * and the rootfs is /dev/mtdblock5.
+	 */
 	flash@60000000 {
 		compatible = "cfi-flash";
 		reg = <0x60000000 0x1000000>;
 		bank-width = <2>;
+
 		partitions {
-			compatible = "redboot-fis";
-			fis-index-block = <127>;
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "RedBoot";
+				reg = <0x000000 0x040000>;
+				read-only;
+			};
+			partition@40000 {
+				label = "stock-zImage";
+				reg = <0x040000 0x100000>;
+				read-only;
+			};
+			partition@140000 {
+				label = "stock-cramfs";
+				reg = <0x140000 0x540000>;
+				read-only;
+			};
+			partition@680000 {
+				label = "osp-kernel";		/* 16 blocks */
+				reg = <0x680000 0x200000>;
+			};
+			partition@880000 {
+				label = "osp-rootfs";		/* 36 blocks, squashfs */
+				reg = <0x880000 0x480000>;
+			};
+			partition@d00000 {
+				label = "osp-restore";		/* 18 blocks, stock payload */
+				reg = <0xd00000 0x240000>;
+			};
+			partition@f40000 {
+				label = "osp-data";		/* 4 blocks, jffs2 */
+				reg = <0xf40000 0x080000>;
+			};
+			partition@fc0000 {
+				/* Writable on purpose: install sets the boot script here,
+				 * osp-restore writes stock's config block back. */
+				label = "RedBoot-config";
+				reg = <0xfc0000 0x020000>;
+			};
+			partition@fe0000 {
+				label = "FIS-directory";
+				reg = <0xfe0000 0x020000>;
+				read-only;
+			};
 		};
 	};
 };

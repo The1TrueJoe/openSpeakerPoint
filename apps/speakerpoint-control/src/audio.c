@@ -6,13 +6,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define STATE_PATH "/var/run/speakerpoint-control.state"
+/* /data is the osp-data jffs2 on an installed box (S03osp-data), tmpfs on a
+ * netbooted one, so settings survive a power cycle exactly when the box is
+ * installed. */
+#define STATE_PATH "/data/speakerpoint-control.state"
 #define APPLY_BIN "/usr/bin/speakerpoint-audio-apply"
 
-/* Defaults for a fresh boot: STATE_PATH lives on tmpfs, so it's gone after
- * every power cycle and these are what the device actually comes up with.
- * "both" (not "off") so audio works out of the box without having to pick an
- * output first. */
+/* Defaults for a first boot (or a netboot, where /data is tmpfs). "both"
+ * (not "off") so audio works out of the box without having to pick an output
+ * first. */
 static int s_volume = 70;
 static char s_output[8] = "both";
 static char s_source[8] = "media";

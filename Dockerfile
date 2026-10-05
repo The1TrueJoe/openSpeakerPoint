@@ -5,7 +5,9 @@
 FROM debian:bookworm-slim AS build-env
 
 ARG BUILDROOT_REPO=https://github.com/buildroot/buildroot
-ARG BUILDROOT_REF=master
+# Pinned: the same LTS openHC builds on, so a rebuild is reproducible and
+# mosquitto (2.0.22) matches across both projects.
+ARG BUILDROOT_REF=2026.02.3
 ARG BR2_JLEVEL=
 ARG TOPLEVEL_JOBS=
 ARG BUILD_TARGETS=all
