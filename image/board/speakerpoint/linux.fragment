@@ -1,7 +1,7 @@
 # Fragment on top of the in-tree "ep93xx" defconfig. The board has an Intel
-# JS28F128 CFI NOR with stock's RedBoot partition table; the kernel uses fixed
-# DT partitions instead (board .dts), which keep stock's regions read-only and
-# give openSpeakerPoint its own kernel/rootfs/restore/data inside stock's old
+# JS28F128 CFI NOR with stock's RedBoot partition table; the kernel uses its own
+# layout instead (mtdparts= below), which keeps stock's regions read-only and
+# gives openSpeakerPoint its own kernel/rootfs/restore/data inside stock's old
 # jffs2.img region. Root is /dev/mtdblock5 (osp-rootfs).
 #
 # Modules are disabled to keep the image self-contained and bootable.
@@ -18,7 +18,13 @@ CONFIG_SND_SOC_SPEAKERPOINT=y
 
 # Provide a safe fallback rootfs cmdline for manual `exec` boot while also
 # pinning serial console speed to match RedBoot/getty.
-CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5 earlyprintk"
+# The flash layout (mtd1..mtd9; mtd0 is the whole chip). Stock's RedBoot,
+# kernel, cramfs and FIS directory are read-only; openSpeakerPoint's kernel,
+# rootfs, stock-restore payload and data sit in stock's old jffs2.img region plus
+# the unallocated 256 KiB after it; RedBoot-config stays writable for install
+# and restore. Kept here rather than in the device tree, whose size is critical
+# on this board (see the board .dts). Appended on a netboot too (CMDLINE_EXTEND).
+CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5 mtdparts=60000000.flash:256k(RedBoot)ro,1m(stock-zImage)ro,5376k(stock-cramfs)ro,2m(osp-kernel),4608k(osp-rootfs),2304k(osp-restore),512k(osp-data),128k(RedBoot-config),128k(FIS-directory)ro"
 CONFIG_CMDLINE_EXTEND=y
 
 # devtmpfs so /dev is populated without a static device table.
@@ -239,12 +245,10 @@ CONFIG_ARM_UNWIND=n
 # CONFIG_KERNEL_* here regardless of what a fragment says.
 
 # --- flash: openSpeakerPoint's partitions + jffs2 stock can read -------------
-# The NOR is split by fixed DT partitions (see the board .dts): stock's
-# RedBoot, kernel, cramfs and FIS directory read-only, openSpeakerPoint's
-# kernel/rootfs/restore/data inside stock's old jffs2.img region. The whole
-# chip is also exposed (mtd0) for osp-restore, which re-creates that region.
+# The NOR is split by mtdparts= (CONFIG_CMDLINE above). The whole chip is also
+# exposed (mtd0) for osp-restore, which re-creates stock's jffs2 region.
 CONFIG_MTD_PARTITIONED_MASTER=y
-CONFIG_MTD_OF_PARTS=y
+CONFIG_MTD_CMDLINE_PARTS=y
 # osp-data is jffs2, and osp-restore re-creates STOCK's jffs2 with it, which
 # the stock 2.4.21 kernel must then read. So only what 2.4 understands: zlib
 # and rtime nodes, no LZO, no summary nodes, no xattrs.
@@ -258,11 +262,3 @@ CONFIG_JFFS2_RTIME=y
 # CONFIG_JFFS2_FS_XATTR is not set
 # CONFIG_JFFS2_COMPRESSION_OPTIONS is not set
 
-# --- early debug output (diagnostic) --------------------------------------------
-# Low-level prints on the same UART as ttyAM0 from the decompressor onwards, so
-# a kernel that hangs before the serial console registers still says where.
-# (A 7.1.8 image on Buildroot 2026.02 hung with no output at all.)
-CONFIG_DEBUG_LL=y
-CONFIG_DEBUG_EP93XX=y
-CONFIG_DEBUG_UNCOMPRESS=y
-CONFIG_EARLY_PRINTK=y
