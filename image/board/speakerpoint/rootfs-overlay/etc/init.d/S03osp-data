@@ -14,16 +14,22 @@ mtd_of() { sed -n "s/^\(mtd[0-9]*\): .* \"$1\"\$/\1/p" /proc/mtd | head -n 1; }
 
 case "$1" in
 start)
-	mkdir -p /data
+	if [ ! -d /data ]; then
+		echo "osp-data: no /data mountpoint in this image"
+		exit 0
+	fi
 	m=$(mtd_of osp-data)
 	if [ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -n 1)" = squashfs ] && [ -n "$m" ]; then
 		dev="/dev/mtdblock${m#mtd}"
 		if ! mount -t jffs2 "$dev" /data 2>/dev/null; then
+			# The mountpoint exists (checked above), so a failed mount is
+			# the partition itself: first boot, or damage.
 			echo "osp-data: formatting $m"
 			flash_erase -q -j "/dev/$m" 0 0 && mount -t jffs2 "$dev" /data
 		fi
 	fi
 	grep -q " /data " /proc/mounts || mount -t tmpfs -o size=1m tmpfs /data
+	mkdir -p /data/dropbear
 	;;
 stop)
 	sync

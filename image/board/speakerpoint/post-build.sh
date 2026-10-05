@@ -55,12 +55,15 @@ force_symlink() {
 # our static site content) as real, read-only files from the image.
 force_symlink /run "$TARGET_DIR/var/run"
 
-# dropbear's init script special-cases /etc/dropbear being a symlink to
-# /var/run/dropbear: it creates that directory instead of trying (and
-# failing, since / is read-only) to mkdir /etc/dropbear itself. Host
-# keys will be regenerated on every boot, which is fine for this test
-# image - it is not meant to be a production/security-hardened build.
-force_symlink /var/run/dropbear "$TARGET_DIR/etc/dropbear"
+# /data is the persistent settings partition on an installed box (osp-data,
+# mounted by S03osp-data; tmpfs on a netboot). The mountpoint has to exist in
+# the image: the squashfs root is read-only, so it cannot be made at boot.
+mkdir -p "$TARGET_DIR/data" || warn "failed to create /data"
+
+# SSH host keys live on /data, so they survive a reboot: regenerating them on
+# every boot took minutes on this 200 MHz ARM9 and changed the host key each
+# time. S03osp-data creates /data/dropbear before dropbear starts (S50).
+force_symlink /data/dropbear "$TARGET_DIR/etc/dropbear"
 
 # Make the MOTD refresh script executable so it can run during boot and
 # write the current LAN address into /etc/motd.

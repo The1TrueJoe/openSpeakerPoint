@@ -283,20 +283,27 @@ class Console:
                 break
         return bytes(buf)
 
-    def wait_login(self, timeout=400):
+    def wait_login(self, timeout=600):
         out = self._read_until([b"login:"], timeout)
         if b"login:" not in out:
             raise IOError("no login prompt on the console")
 
-    def login(self):
-        self.ser.write(b"\r")
-        out = self._read_until([b"login:", b"# "], 5)
-        if b"login:" in out:
-            self.ser.write(b"root\r")
-            self._read_until([b"assword"], 5)
-            self.ser.write(OSP_PASSWORD.encode() + b"\r")
-            if b"# " not in self._read_until([b"# "], 10):
-                raise IOError("console login failed")
+    def login(self, attempts=4):
+        # Boot messages that land after the getty prompt can swallow the
+        # first exchange, so try a few times.
+        for _ in range(attempts):
+            self.ser.write(b"\r")
+            out = self._read_until([b"login:", b"# "], 5)
+            if b"# " in out and b"login:" not in out:
+                return
+            if b"login:" in out:
+                self.ser.write(b"root\r")
+                self._read_until([b"assword"], 5)
+                self.ser.write(OSP_PASSWORD.encode() + b"\r")
+                if b"# " in self._read_until([b"# "], 10):
+                    return
+            time.sleep(3)
+        raise IOError("console login failed")
 
     def run(self, cmd, timeout=20) -> str:
         mark = f"__spflash_{int(time.time() * 1000)}__"
@@ -434,11 +441,34 @@ def stock_payload(box: Box, nor: bytes) -> bytes:
 
 
 def write_part(box: Box, label: str, data: bytes):
-    box.put(data, f"/tmp/{label}.img")
-    try:
-        print("   ", box.run(f"osp-flash write {label} /tmp/{label}.img"))
-    finally:
-        box.run(f"rm -f /tmp/{label}.img", check=False)
+    """Stream an image straight onto an openSpeakerPoint partition and verify it.
+
+    Nothing is staged in /tmp: the netbooted RAM system keeps its whole root
+    filesystem in RAM and has ~5 MiB free, so a 2-4 MiB upload there gets the
+    OOM killer going. Erase what the image needs, write it from the SSH
+    stream, then read it back against the local md5.
+    """
+    if label not in ("osp-kernel", "osp-rootfs", "osp-restore"):
+        raise IOError(f"refusing to write {label}")
+    mtd = box.run(f"""sed -n 's/^mtd\\([0-9]*\\): .* "{label}"$/\\1/p' /proc/mtd""")
+    if not mtd.isdigit():
+        raise IOError(f"no {label} partition")
+    size = int(box.run(f"cat /sys/class/mtd/mtd{mtd}/size"))
+    erase = int(box.run(f"cat /sys/class/mtd/mtd{mtd}/erasesize"))
+    if len(data) > size:
+        raise IOError(f"{label}: image is {len(data)} bytes, partition {size}")
+    blocks = -(-len(data) // erase)
+    box.run(f"flash_erase -q /dev/mtd{mtd} 0 {blocks}")
+    stdin, out, err = box.c.exec_command(f"dd of=/dev/mtd{mtd} bs=4096 2>/dev/null")
+    for i in range(0, len(data), 65536):
+        stdin.write(data[i:i + 65536])
+    stdin.channel.shutdown_write()
+    if out.channel.recv_exit_status() != 0:
+        raise IOError(f"{label}: write failed: {err.read().decode('utf-8', 'replace').strip()}")
+    got = box.run(f"head -c {len(data)} /dev/mtd{mtd} | md5sum").split()[0]
+    if got != md5(data):
+        raise IOError(f"{label}: reads back {got}, expected {md5(data)}")
+    print(f"    {label}: {len(data)} bytes written and verified ({got})")
 
 
 def set_boot_script(rb: RedBoot):
@@ -479,6 +509,12 @@ def do_install(ser, images: str, backups: str, host: str = None):
     box = Box(ip)
     if box.booted_from_flash():
         sys.exit("error: this system booted from flash; an install must run from the netbooted RAM system")
+    # The RAM system keeps its whole root filesystem in RAM and has ~5 MiB to
+    # spare; with its audio and MQTT services running, the OOM killer takes
+    # SSH sessions mid-install. Nothing they do is needed for an install.
+    box.run("for s in S99shairport-sync S61speakerpoint-control S58mpd S50mosquitto S50crond S90httpd; do "
+            "[ -x /etc/init.d/$s ] && /etc/init.d/$s stop; done >/dev/null 2>&1; sync; "
+            "echo 3 > /proc/sys/vm/drop_caches; rm -f /tmp/*.img", check=False)
 
     unit = box.run("hostname")
     nor = backup_nor(box, os.path.join(backups, unit))
@@ -495,7 +531,9 @@ def do_install(ser, images: str, backups: str, host: str = None):
         write_part(box, "osp-restore", payload)   # first: the way back exists before anything else goes
     write_part(box, "osp-kernel", kernel)
     write_part(box, "osp-rootfs", rootfs)
-    print("   ", box.run("osp-flash format-data"))
+    data = box.run("""sed -n 's/^mtd\\([0-9]*\\): .* "osp-data"$/\\1/p' /proc/mtd""")
+    box.run(f"flash_erase -q -j /dev/mtd{data} 0 0")
+    print("    osp-data: empty jffs2")
 
     print("\n== Test boot from flash (nothing saved yet) ==")
     con.hw_reset()
@@ -505,7 +543,7 @@ def do_install(ser, images: str, backups: str, host: str = None):
     print("   ", rb.cmd(BOOT_SCRIPT[0], timeout=60).strip())   # copies the 9 MiB region to RAM
     print("   ", BOOT_SCRIPT[1])
     rb.ser.write(BOOT_SCRIPT[1].encode() + b"\r\n")
-    con.wait_login(timeout=300)
+    con.wait_login(timeout=600)    # a first boot also generates SSH host keys
     con.login()
     if con.run("awk '$2 == \"/\" { print $3 }' /proc/mounts | tail -n 1") != "squashfs":
         sys.exit("error: the test boot did not come up from flash")
@@ -518,7 +556,7 @@ def do_install(ser, images: str, backups: str, host: str = None):
     set_boot_script(rb)
     print(rb.cmd("fconfig -l -n").strip())
     rb.ser.write(b"reset\r\n")
-    con.wait_login(timeout=300)
+    con.wait_login(timeout=600)
     print("\n  Installed. The SpeakerPoint now boots openSpeakerPoint from flash; settings persist in /data.")
     print("  Return to stock any time: the dashboard's Settings, MQTT cmd/system/restore, or")
     print(f"  ./spflash.py restore --host <ip>. Full NOR backup: {os.path.join(backups, unit)}")

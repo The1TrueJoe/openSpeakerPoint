@@ -25,6 +25,7 @@ typedef struct {
     int peak;
     int armed;              /* went below -HYST since the last crossing */
     long crossings;
+    long first, last;       /* frame index of the first and last crossing */
 } chan_t;
 
 static double dbfs(double v)
@@ -36,10 +37,14 @@ static void chan_json(char *out, size_t len, const char *name, const chan_t *c, 
 {
     double rms = frames ? sqrt(c->sumsq / (double)frames) : 0;
     double rms_db = dbfs(rms);
-    double secs = (double)frames / RATE;
-    if (rms_db > FREQ_FLOOR_DBFS && secs > 0) {
+    /* Pitch over the span between the first and last crossing, not the whole
+     * window: a tone that starts or stops mid-recording would otherwise read
+     * low in proportion (it did: 0.7x for a tone covering 70% of the window).
+     * Noise at the floor stays inside the hysteresis band and adds nothing. */
+    double span = (double)(c->last - c->first) / RATE;
+    if (rms_db > FREQ_FLOOR_DBFS && c->crossings > 2 && span > 0) {
         snprintf(out, len, "\"%s\":{\"rms_dbfs\":%.1f,\"peak_dbfs\":%.1f,\"freq_hz\":%.1f}",
-                 name, rms_db, dbfs(c->peak), (double)c->crossings / secs);
+                 name, rms_db, dbfs(c->peak), (double)(c->crossings - 1) / span);
     } else {
         snprintf(out, len, "\"%s\":{\"rms_dbfs\":%.1f,\"peak_dbfs\":%.1f,\"freq_hz\":null}",
                  name, rms_db, dbfs(c->peak));
@@ -93,6 +98,8 @@ int measure_linein(int seconds, char *out, size_t out_len)
                     k->armed = 1;
                 } else if (k->armed && k->y > HYST) {
                     k->armed = 0;
+                    if (!k->crossings) k->first = seen;
+                    k->last = seen;
                     k->crossings++;
                 }
             }

@@ -38,7 +38,8 @@ case "${1:-}" in
 		;;
 	format-data)
 		m=$(mtd_of osp-data); [ -n "$m" ] || die "no osp-data partition"
-		grep -q " /data " /proc/mounts && die "/data is mounted"
+		# Only a /data on the flash itself is in the way; a netboot's is tmpfs.
+		grep -q "^/dev/mtdblock${m#mtd} " /proc/mounts && die "osp-data is mounted"
 		flash_erase -q -j "/dev/$m" 0 0
 		say "osp-data: empty jffs2"
 		;;
