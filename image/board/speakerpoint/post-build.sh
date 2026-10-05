@@ -65,6 +65,10 @@ mkdir -p "$TARGET_DIR/data" || warn "failed to create /data"
 # time. S03osp-data creates /data/dropbear before dropbear starts (S50).
 force_symlink /data/dropbear "$TARGET_DIR/etc/dropbear"
 
+# The login banner is rewritten at boot (S41motd, with the box's address), and
+# the root is read-only, so it lives on /run.
+force_symlink /run/motd "$TARGET_DIR/etc/motd"
+
 # Make the MOTD refresh script executable so it can run during boot and
 # write the current LAN address into /etc/motd.
 if [ -f "$TARGET_DIR/etc/init.d/S41motd" ]; then
