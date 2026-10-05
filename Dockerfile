@@ -5,9 +5,11 @@
 FROM debian:bookworm-slim AS build-env
 
 ARG BUILDROOT_REPO=https://github.com/buildroot/buildroot
-# Pinned: the same LTS openHC builds on, so a rebuild is reproducible and
-# mosquitto (2.0.22) matches across both projects.
-ARG BUILDROOT_REF=2026.02.3
+# Pinned to a commit, so a rebuild is reproducible. A branch, tag or full SHA
+# all work. Not 2026.02.3: kernels built with its gcc 14 toolchain hang at the
+# RedBoot handoff on this ARM920T, before printing anything; this master
+# commit's gcc 15 toolchain boots (and brings mosquitto 2.1.2).
+ARG BUILDROOT_REF=c29ff5b9b38e87af3df0c95c7e3d6f51c0c0688b
 ARG BR2_JLEVEL=
 ARG TOPLEVEL_JOBS=
 ARG BUILD_TARGETS=all
@@ -42,7 +44,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         npm \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "$BUILDROOT_REF" "$BUILDROOT_REPO" /opt/buildroot
+RUN git init -q /opt/buildroot \
+    && git -C /opt/buildroot fetch -q --depth 1 "$BUILDROOT_REPO" "$BUILDROOT_REF" \
+    && git -C /opt/buildroot checkout -q FETCH_HEAD
 
 # Buildroot refuses to run as root by default; create an unprivileged user
 # so `make` behaves the same as on a normal dev machine.
