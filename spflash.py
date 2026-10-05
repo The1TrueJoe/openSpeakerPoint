@@ -336,7 +336,9 @@ class Box:
             raise IOError(f"{path} arrived corrupted")
 
     def booted_from_flash(self) -> bool:
-        return "root=/dev/mtdblock" in self.run("cat /proc/cmdline")
+        # What is mounted at / - not the command line, which carries the
+        # kernel's built-in root= even on a netboot.
+        return self.run("awk '$2 == \"/\" { print $3 }' /proc/mounts | tail -n 1") == "squashfs"
 
 
 def backup_nor(box: Box, dest_dir: str) -> bytes:
@@ -485,7 +487,7 @@ def do_install(ser, images: str, backups: str, host: str = None):
     rb.ser.write(BOOT_SCRIPT[1].encode() + b"\r\n")
     con.wait_login(timeout=300)
     con.login()
-    if "root=/dev/mtdblock5" not in con.run("cat /proc/cmdline"):
+    if con.run("awk '$2 == \"/\" { print $3 }' /proc/mounts | tail -n 1") != "squashfs":
         sys.exit("error: the test boot did not come up from flash")
     print("  Booted from flash.")
 

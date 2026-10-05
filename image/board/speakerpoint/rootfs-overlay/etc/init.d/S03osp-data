@@ -1,10 +1,12 @@
 #!/bin/sh
 # /data: openSpeakerPoint's persistent settings, on the osp-data jffs2.
 #
-# Only when this system was booted from flash (an install: root is osp-rootfs).
-# A netbooted RAM system may be running on a box that is still stock, where
-# osp-data's blocks belong to stock's jffs2 - so there /data is plain tmpfs and
-# the flash is never touched. On an install, a partition that will not mount
+# Only when this system was booted from flash (an install: / is the squashfs on
+# osp-rootfs). A netbooted RAM system may be running on a box that is still
+# stock, where osp-data's blocks belong to stock's jffs2 - so there /data is
+# plain tmpfs and the flash is never touched. NB: the kernel command line is no
+# guide - CONFIG_CMDLINE (root=/dev/mtdblock5) is appended on a netboot too;
+# what is actually mounted at / is. On an install, a partition that will not mount
 # (first boot, or damage) is formatted rather than leaving the box without
 # settings.
 
@@ -14,7 +16,7 @@ case "$1" in
 start)
 	mkdir -p /data
 	m=$(mtd_of osp-data)
-	if grep -q "root=/dev/mtdblock" /proc/cmdline && [ -n "$m" ]; then
+	if [ "$(awk '$2 == "/" { print $3 }' /proc/mounts | tail -n 1)" = squashfs ] && [ -n "$m" ]; then
 		dev="/dev/mtdblock${m#mtd}"
 		if ! mount -t jffs2 "$dev" /data 2>/dev/null; then
 			echo "osp-data: formatting $m"
