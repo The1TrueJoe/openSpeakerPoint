@@ -172,7 +172,13 @@ class RedBoot:
             time.sleep(0.03)
             buf += self.ser.read(self.ser.in_waiting or 1)
             if self.PROMPT in buf:
-                self.read_until(self.PROMPT, 0.5)
+                # Let the ^C storm drain and confirm a clean prompt: leftover
+                # input here is what makes the next YMODEM header go
+                # unacknowledged.
+                time.sleep(1.0)
+                self.ser.reset_input_buffer()
+                self.ser.write(b"\r\n")
+                self.read_until(self.PROMPT, 3)
                 print(" OK")
                 return True
             if time.time() - last_dot > 1.0:
@@ -214,8 +220,22 @@ def _load(rb: RedBoot, addr: int, path: str) -> int:
     name = os.path.basename(path)
     est = len(data) / (BAUD / 10) + 5      # ~10 bits/byte on the wire
     print(f"  Transferring {name} ({len(data) // 1024} KiB, ~{est / 60:.1f} min at {BAUD} baud)")
-    rb.begin_ymodem_load(addr)
-    ymodem_send(rb.ser, name, data, progress=_bar)
+    for attempt in (1, 2):
+        rb.begin_ymodem_load(addr)
+        try:
+            ymodem_send(rb.ser, name, data, progress=_bar)
+            break
+        except IOError as e:
+            if attempt == 2 or "header" not in str(e):
+                raise
+            # RedBoot sometimes misses the very first header after a reset;
+            # abort its receive and go again.
+            print(f"\n    ({e}; retrying)")
+            rb.ser.write(bytes([CAN, CAN, CAN]))
+            time.sleep(2)
+            rb.ser.reset_input_buffer()
+            rb.ser.write(b"\r\n")
+            rb.read_until(rb.PROMPT, 5)
     print()
     rb.read_until(rb.PROMPT, 15)
     return len(data)
