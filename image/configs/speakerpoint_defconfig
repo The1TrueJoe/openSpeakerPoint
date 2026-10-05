@@ -27,6 +27,12 @@ BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoi
 # BR2_EXTERNAL package dirs aren't scanned for patches by name alone.
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/package"
 BR2_LINUX_KERNEL=y
+# Pinned. The AC97/DMA path is out-of-tree code on a board nobody upstream
+# tests: 7.1.4 played audio, while 7.2.9 (what an unpinned Buildroot master
+# picked up in October 2026) fails every PCM open with a silent EINVAL - the
+# DMA channels never attach. 7.1.8 is also what openHC runs.
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.8"
 BR2_LINUX_KERNEL_DEFCONFIG="ep93xx"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/linux.fragment"
 # XZ compresses noticeably better than gzip (RAM is no constraint at

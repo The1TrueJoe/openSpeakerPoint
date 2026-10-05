@@ -53,6 +53,23 @@ amix() {
 	return 0
 }
 
+# Every mixer write for one apply goes through ONE amixer process: each amixer
+# run re-parses ALSA's config, about half a second on this 200 MHz ARM9, and an
+# apply used to make ~20 of them (7.5 s per volume change). `amixer -s` reads
+# the commands from stdin; missing controls are ignored there, and a real
+# failure stops the batch with a non-zero exit, which is reported.
+MIXQ=""
+mix() { MIXQ="$MIXQ$*
+"; }
+mix_flush() {
+	[ -n "$MIXQ" ] || return 0
+	if ! out=$(printf '%s' "$MIXQ" | amixer -c "$CARD" -q -s 2>&1); then
+		warn "amixer batch: ${out%%
+*}"
+	fi
+	MIXQ=""
+}
+
 # --- D2-41051 amp over I2C: 24-bit register address + 24-bit data, MSB first
 d2_write() { # d2_write AAAAAA DDDDDD
 	[ -c "/dev/i2c-${I2C_BUS}" ] || { warn "no /dev/i2c-${I2C_BUS}"; return 1; }
@@ -135,9 +152,9 @@ do_apply() {
 	# S/PDIF transmitter both read it), so it stays fully up whenever any
 	# output is active and only the per-path stages below do the muting.
 	if [ "$output" = "off" ]; then
-		amix sset PCM 0% mute
+		mix sset PCM 0% mute
 	else
-		amix sset PCM 100% unmute
+		mix sset PCM 100% unmute
 	fi
 
 	# Silence every mixer path this board doesn't use. The STAC9758 is a
@@ -146,40 +163,50 @@ do_apply() {
 	# happened to be in, they add audible hiss/crosstalk. "Declarative" has
 	# to mean ALL the state, not just the parts we actively set, or noise
 	# leaks back in from whatever touched the mixer last.
-	for c in Surround Center LFE "Master Mono" "Surround Mix"; do
-		amix sset "$c" 0% mute 2>/dev/null
-	done
-	for c in CD Aux Phone Mic "PC Speaker" "Video"; do
-		amix sset "$c" 0% mute 2>/dev/null
+	for c in Surround Center LFE "'Master Mono'" "'Surround Mix'" CD Aux Phone Mic "'PC Speaker'" Video; do
+		mix sset "$c" 0% mute
 	done
 	# Line-in is only unmuted into the mix when it's the selected source.
 	if [ "$source" != linein ]; then
-		amix sset Line 0% mute 2>/dev/null
+		mix sset Line 0% mute
 	fi
 
 	# --- analog path (RCA) ---
 	if [ "$analog" = yes ]; then
-		amix sset Master "${volume}%" unmute
-		amix sset Front  "${volume}%" unmute
+		mix sset Master "${volume}%" unmute
+		mix sset Front  "${volume}%" unmute
 	else
-		amix sset Master mute
-		amix sset Front  mute
+		mix sset Master mute
+		mix sset Front  mute
 	fi
 
 	# --- digital path (S/PDIF -> D2 amp) ---
 	if [ "$digital" = yes ]; then
 		# SPSA=0 points the transmitter at slots 3&4, where the PCM audio
 		# actually is. Without this it reads empty slots and sends silence.
-		amix cset name="$SPDIF_SPSA" 0
-		amix cset name="$SPDIF_SW" on
+		mix cset "'name=$SPDIF_SPSA'" 0
+		mix cset "'name=$SPDIF_SW'" on
+	else
+		mix cset "'name=$SPDIF_SW'" off
+	fi
+
+	# --- capture path (line-in loopback): mixer side ---
+	if [ "$source" = linein ]; then
+		mix sset Line 80% unmute
+		mix sset Capture 80% cap
+		mix cset "'name=Capture Source'" Line
+	fi
+	mix_flush
+
+	# --- the D2 amp: its own registers, over I2C ---
+	if [ "$digital" = yes ]; then
 		d2_write "020001" "c00001"                 # amp input = S/PDIF
 		d2_write "000000" "$(d2_vol_hex "$volume")" # amp master volume
 	else
-		amix cset name="$SPDIF_SW" off
 		d2_write "000000" "000000"                 # amp hard mute
 	fi
 
-	# --- capture path (line-in loopback) ---
+	# --- the loopback process, once the mixer is set ---
 	if [ "$source" = linein ]; then
 		linein_start
 	else
@@ -208,9 +235,6 @@ linein_start() {
 		return 0
 	fi
 	linein_stop
-	amix sset "Line" 80% unmute
-	amix sset Capture 80% cap
-	amix cset name="Capture Source" Line
 	(
 		alsaloop -C sp_capture -P default -t 50000 >/dev/null 2>&1 &
 		echo "$!" > "$LINEIN_PIDFILE"
@@ -226,8 +250,9 @@ linein_start() {
 # the selected source.
 do_capture() {
 	linein_stop
-	amix cset name="Capture Source" Line
-	amix sset Capture 0% cap
+	mix cset "'name=Capture Source'" Line
+	mix sset Capture 0% cap
+	mix_flush
 }
 
 # --- test tones -------------------------------------------------------------
