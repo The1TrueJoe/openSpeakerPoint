@@ -33,10 +33,10 @@ BR2_LINUX_KERNEL=y
 # DMA channels never attach. 7.1.8 is also what openHC runs.
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.8"
-# The toolchain takes its headers from that kernel; 2026.02 checks the series
-# strictly and defaults to 2.6 for a custom version, so say 6.19+ ("at least").
+# The toolchain takes its headers from that kernel, and Buildroot checks the
+# declared series against it exactly.
 BR2_KERNEL_HEADERS_AS_KERNEL=y
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_19=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_7_1=y
 BR2_LINUX_KERNEL_DEFCONFIG="ep93xx"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/linux.fragment"
 # XZ compresses noticeably better than gzip (RAM is no constraint at
@@ -110,7 +110,9 @@ BR2_PACKAGE_MBEDTLS=y
 BR2_PACKAGE_SHAIRPORT_SYNC=y
 BR2_PACKAGE_MOSQUITTO=y
 BR2_PACKAGE_MOSQUITTO_BROKER=y
-BR2_PACKAGE_LIBWEBSOCKETS=y
+# Websockets for the dashboard's MQTT (mosquitto 2.1: an explicit choice; the
+# built-in implementation avoids libwebsockets but, like it, needs OpenSSL).
+BR2_PACKAGE_MOSQUITTO_WS_BUILTIN=y
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 BR2_TARGET_ROOTFS_SQUASHFS_BS_1024K=y
