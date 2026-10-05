@@ -18,7 +18,7 @@ CONFIG_SND_SOC_SPEAKERPOINT=y
 
 # Provide a safe fallback rootfs cmdline for manual `exec` boot while also
 # pinning serial console speed to match RedBoot/getty.
-CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5"
+CONFIG_CMDLINE="root=/dev/mtdblock5 ro rootfstype=squashfs console=ttyAM0,57600 panic=5 earlyprintk"
 CONFIG_CMDLINE_EXTEND=y
 
 # devtmpfs so /dev is populated without a static device table.
@@ -257,3 +257,12 @@ CONFIG_JFFS2_RTIME=y
 # CONFIG_JFFS2_SUMMARY is not set
 # CONFIG_JFFS2_FS_XATTR is not set
 # CONFIG_JFFS2_COMPRESSION_OPTIONS is not set
+
+# --- early debug output (diagnostic) --------------------------------------------
+# Low-level prints on the same UART as ttyAM0 from the decompressor onwards, so
+# a kernel that hangs before the serial console registers still says where.
+# (A 7.1.8 image on Buildroot 2026.02 hung with no output at all.)
+CONFIG_DEBUG_LL=y
+CONFIG_DEBUG_EP93XX=y
+CONFIG_DEBUG_UNCOMPRESS=y
+CONFIG_EARLY_PRINTK=y
