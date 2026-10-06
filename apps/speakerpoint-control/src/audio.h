@@ -13,6 +13,15 @@ bool audio_valid_output(const char *mode);
 void audio_set_output(const char *mode);
 void audio_set_volume(int volume);  /* clamped 0-100; volume only, no re-route */
 void audio_tick(void);              /* call about once a second: saves a settled volume */
+
+/* Tone on the amp's DSP (Control4's own controls): bass and treble -14..14
+ * (0 flat), loudness on/off. Saved like the volume. */
+void audio_set_bass(int v);
+void audio_set_treble(int v);
+void audio_set_loudness(bool on);
+int audio_bass(void);
+int audio_treble(void);
+bool audio_loudness(void);
 const char *audio_output(void);
 int audio_volume(void);
 

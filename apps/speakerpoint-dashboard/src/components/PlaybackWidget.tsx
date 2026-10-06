@@ -38,7 +38,7 @@ interface PlaybackWidgetProps {
  * above the bottom nav. Lets you route output and mute/adjust volume from
  * anywhere without leaving the current page. */
 export function PlaybackWidget({ onOpenNowPlaying, className }: PlaybackWidgetProps) {
-  const { state, output, source, volume } = useDevice();
+  const { state, output, source, volume, tone } = useDevice();
   const { now } = useNowPlaying();
 
   const current = state.data;
@@ -167,6 +167,44 @@ export function PlaybackWidget({ onOpenNowPlaying, className }: PlaybackWidgetPr
           onBlur={release}
         />
       </div>
+
+      {/* The amp's own tone controls (speakers): only meaningful on the amp. */}
+      {tone.bass !== undefined && current?.output !== "rca" && current?.output !== "off" && (
+        <div className="mt-3 space-y-1.5 border-t border-white/5 pt-3 text-xs">
+          <ToneSlider label="Bass" value={tone.bass} onChange={tone.setBass} />
+          <ToneSlider label="Treble" value={tone.treble ?? 0} onChange={tone.setTreble} />
+          <label className="flex items-center gap-2 text-slate-400">
+            <input type="checkbox" checked={!!tone.loudness} onChange={(e) => tone.setLoudness(e.target.checked)} />
+            Loudness (fuller sound at low volume)
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -14..14 on the amp's tone table (0 flat); sends while dragging, throttled. */
+function ToneSlider({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+  const [drag, setDrag] = useState<number | null>(null);
+  const last = useRef(0);
+  const shown = drag ?? value;
+  const send = (v: number, force = false) => {
+    const now = Date.now();
+    if (!force && now - last.current < 120) return;
+    last.current = now;
+    onChange(v);
+  };
+  const release = () => {
+    if (drag !== null) send(drag, true);
+    setDrag(null);
+  };
+  return (
+    <div className="flex items-center gap-2" onDoubleClick={() => { setDrag(null); onChange(0); }} title="Double-click for flat">
+      <span className="w-12 shrink-0 text-slate-400">{label}</span>
+      <input type="range" className="slider min-w-0 flex-1" min={-14} max={14} value={shown}
+        onChange={(e) => { const v = Number(e.target.value); setDrag(v); send(v); }}
+        onPointerUp={release} onKeyUp={release} onBlur={release} />
+      <span className="w-8 shrink-0 text-right tabular-nums text-slate-300">{shown > 0 ? `+${shown}` : shown}</span>
     </div>
   );
 }

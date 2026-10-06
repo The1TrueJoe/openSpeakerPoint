@@ -48,6 +48,10 @@ export interface Snapshot {
   output?: OutputMode;
   source?: SourceMode;
   volume?: number;
+  /** The amp's own tone, as Control4 drove it: -14..14, 0 flat. */
+  bass?: number;
+  treble?: number;
+  loudness?: boolean;
   now?: NowPlaying;
   library?: LibraryState;
   restore?: RestoreState;
@@ -96,6 +100,12 @@ function onMessage(topic: string, payload: Buffer) {
       return update({ output: value as OutputMode });
     case "state/audio/source":
       return update({ source: value as SourceMode });
+    case "state/audio/bass":
+      return update({ bass: Number(value) });
+    case "state/audio/treble":
+      return update({ treble: Number(value) });
+    case "state/audio/loudness":
+      return update({ loudness: value === "ON" });
     case "state/audio/volume":
       return update({ volume: Number(value) });
     case "state/now":

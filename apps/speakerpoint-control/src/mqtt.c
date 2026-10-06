@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -29,6 +30,7 @@ static struct {
     char output[8];
     char source[8];
     int volume;
+    int bass, treble, loudness;
     char now[2048];
     char library[128];
     char restore[160];
@@ -95,6 +97,23 @@ static void publish_changed(void)
         snprintf(v, sizeof(v), "%d", vol);
         publish("state/audio/volume", v, 1);
         s_last.volume = vol;
+    }
+    int bass = audio_bass(), treble = audio_treble(), loud = audio_loudness() ? 1 : 0;
+    if (!s_last.valid || bass != s_last.bass) {
+        char v[8];
+        snprintf(v, sizeof(v), "%d", bass);
+        publish("state/audio/bass", v, 1);
+        s_last.bass = bass;
+    }
+    if (!s_last.valid || treble != s_last.treble) {
+        char v[8];
+        snprintf(v, sizeof(v), "%d", treble);
+        publish("state/audio/treble", v, 1);
+        s_last.treble = treble;
+    }
+    if (!s_last.valid || loud != s_last.loudness) {
+        publish("state/audio/loudness", loud ? "ON" : "OFF", 1);
+        s_last.loudness = loud;
     }
     char now[sizeof(s_last.now)];
     now_playing_json(now, sizeof(now));
@@ -183,6 +202,18 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
     } else if (!strcmp(cmd, "audio/volume")) {
         if (!is_int(val) || atoi(val) > 100) { publish_error(msg->topic, "expected 0-100"); return; }
         audio_set_volume(atoi(val));
+    } else if (!strcmp(cmd, "audio/bass") || !strcmp(cmd, "audio/treble")) {
+        const char *v = val[0] == '-' || val[0] == '+' ? val + 1 : val;
+        if (!is_int(v) || abs(atoi(val)) > 14) { publish_error(msg->topic, "expected -14..14"); return; }
+        if (!strcmp(cmd, "audio/bass")) audio_set_bass(atoi(val));
+        else audio_set_treble(atoi(val));
+    } else if (!strcmp(cmd, "audio/loudness")) {
+        bool on;
+        if (!strcasecmp(val, "ON") || !strcmp(val, "1")) on = true;
+        else if (!strcasecmp(val, "OFF") || !strcmp(val, "0")) on = false;
+        else if (!strcasecmp(val, "TOGGLE")) on = !audio_loudness();
+        else { publish_error(msg->topic, "expected ON|OFF|TOGGLE"); return; }
+        audio_set_loudness(on);
     } else if (!strcmp(cmd, "transport")) {
         if (player_transport(val)) { publish_error(msg->topic, "expected play|pause|stop|next|prev"); return; }
     } else if (!strcmp(cmd, "seek")) {

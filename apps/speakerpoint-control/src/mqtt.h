@@ -12,6 +12,9 @@
  *   <base>/state/audio/output      off|rca|amp|both          (retained)
  *   <base>/state/audio/source      media|linein              (retained)
  *   <base>/state/audio/volume      0-100                     (retained)
+ *   <base>/state/audio/bass        -14..14 (0 flat)          (retained; the amp's
+ *   <base>/state/audio/treble      -14..14 (0 flat)           own tone, as Control4
+ *   <base>/state/audio/loudness    ON|OFF                     drove it)
  *   <base>/state/now               now-playing JSON          (retained)
  *   <base>/state/library           {usb, updating, rev}      (retained; re-fetch
  *                                  GET /api/library when rev changes)
@@ -19,6 +22,9 @@
  *   <base>/cmd/audio/output        off|rca|amp|both
  *   <base>/cmd/audio/source        media|linein
  *   <base>/cmd/audio/volume        0-100
+ *   <base>/cmd/audio/bass          -14..14
+ *   <base>/cmd/audio/treble        -14..14
+ *   <base>/cmd/audio/loudness      ON|OFF|TOGGLE
  *   <base>/cmd/transport           play|pause|stop|next|prev
  *   <base>/cmd/seek                seconds
  *   <base>/cmd/play                library index

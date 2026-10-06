@@ -35,6 +35,29 @@ static int s_volume = 70;
 static char s_output[8] = "both";
 static char s_source[8] = "media";
 
+/* Tone on the amp's own DSP — the controls Control4's spserver drove, found by
+ * disassembling it (stock jffs2, /control4/bin/spserver): on a DAE-4 part
+ * (reg 0x020003 == 0x050101, which this D2-41051 is) bass is registers
+ * 0x00000B/0x00000F (left/right), treble 0x00000D/0x000011, loudness
+ * 0x0000DB/0x0000DE (1 on, 0 off). Bass and treble take spserver's
+ * toneGainTable, 29 steps, flat in the middle; entry 0 is the most boost
+ * (confirmed by ear), so a setting v in -14..14 is entry 14 - v. */
+#define TONE_STEPS 14
+static const unsigned TONE_GAIN[2 * TONE_STEPS + 1] = {
+    0x7fffff, 0x6ef051, 0x5f64f0, 0x518a50, 0x453160, 0x3a3031, 0x30615f, 0x27a39a, 0x1fd930, 0x18e7aa,
+    0x12b771, 0x0d3381, 0x08491d, 0x03e793, 0x000000, 0xfc8521, 0xf96b24, 0xf6a77e, 0xf430ce, 0xf1feb4,
+    0xf009ba, 0xee4b3c, 0xecbd4c, 0xeb5aa2, 0xea1e8a, 0xe904d2, 0xe809bd, 0xe729f6, 0xe66285,
+};
+#define D2_BASS_L 0x00000B
+#define D2_BASS_R 0x00000F
+#define D2_TREBLE_L 0x00000D
+#define D2_TREBLE_R 0x000011
+#define D2_LOUD_L 0x0000DB
+#define D2_LOUD_R 0x0000DE
+
+static int s_bass, s_treble;      /* -14..14 */
+static bool s_loudness;
+
 static bool s_dirty;
 static time_t s_changed_at;
 
@@ -102,6 +125,22 @@ static void volume_hw(void)
     }
 }
 
+static int clamp_tone(int v)
+{
+    return v < -TONE_STEPS ? -TONE_STEPS : v > TONE_STEPS ? TONE_STEPS : v;
+}
+
+/* Bass, treble and loudness onto the amp (both channels each). */
+static void tone_hw(void)
+{
+    unsigned b = TONE_GAIN[TONE_STEPS - s_bass], t = TONE_GAIN[TONE_STEPS - s_treble];
+    unsigned l = s_loudness ? 1 : 0;
+    if (d2_write(D2_BASS_L, b) < 0 || d2_write(D2_BASS_R, b) < 0 ||
+        d2_write(D2_TREBLE_L, t) < 0 || d2_write(D2_TREBLE_R, t) < 0 ||
+        d2_write(D2_LOUD_L, l) < 0 || d2_write(D2_LOUD_R, l) < 0)
+        fprintf(stderr, "speakerpoint-control: D2 tone write failed\n");
+}
+
 static int clamp_volume(int v)
 {
     if (v < 0) return 0;
@@ -157,13 +196,14 @@ static void run_apply(const char *fmt, ...)
 static void apply_all(void)
 {
     run_apply("apply %s %s %d %06x %.1f", s_output, s_source, s_volume, d2_word(s_volume), vol_db(s_volume));
+    tone_hw();
 }
 
 static void save_state(void)
 {
     FILE *f = fopen(STATE_PATH, "w");
     if (!f) return;
-    fprintf(f, "%d %s %s\n", s_volume, s_output, s_source);
+    fprintf(f, "%d %s %s %d %d %d\n", s_volume, s_output, s_source, s_bass, s_treble, s_loudness ? 1 : 0);
     fclose(f);
 }
 
@@ -173,7 +213,8 @@ void audio_load(void)
     if (!f) return;
     int volume;
     char output[8], source[8];
-    int n = fscanf(f, "%d %7s %7s", &volume, output, source);
+    int bass = 0, treble = 0, loud = 0;
+    int n = fscanf(f, "%d %7s %7s %d %d %d", &volume, output, source, &bass, &treble, &loud);
     if (n >= 2) {
         s_volume = clamp_volume(volume);
         if (audio_valid_output(output)) {
@@ -182,6 +223,11 @@ void audio_load(void)
     }
     if (n >= 3 && audio_valid_source(source)) {
         snprintf(s_source, sizeof(s_source), "%s", source);
+    }
+    if (n >= 6) {
+        s_bass = clamp_tone(bass);
+        s_treble = clamp_tone(treble);
+        s_loudness = loud != 0;
     }
     fclose(f);
 }
@@ -211,6 +257,33 @@ void audio_set_volume(int volume)
     s_dirty = true;
     s_changed_at = time(NULL);
 }
+
+void audio_set_bass(int v)
+{
+    s_bass = clamp_tone(v);
+    tone_hw();
+    s_dirty = true;
+    s_changed_at = time(NULL);
+}
+
+void audio_set_treble(int v)
+{
+    s_treble = clamp_tone(v);
+    tone_hw();
+    s_dirty = true;
+    s_changed_at = time(NULL);
+}
+
+void audio_set_loudness(bool on)
+{
+    s_loudness = on;
+    tone_hw();
+    save_state();
+}
+
+int audio_bass(void) { return s_bass; }
+int audio_treble(void) { return s_treble; }
+bool audio_loudness(void) { return s_loudness; }
 
 void audio_tick(void)
 {
