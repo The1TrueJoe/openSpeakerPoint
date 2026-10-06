@@ -12,6 +12,8 @@ directory.
                                          openSpeakerPoint, verified
     ./spflash.py restore --host IP       return an installed box to stock Control4
                                          (runs the box's own osp-restore)
+    ./spflash.py update  --host IP       write new kernel + rootfs to an installed box
+                                         over SSH (seconds; no serial, no RedBoot)
 
 How the install lays the flash out (board .dts): stock keeps RedBoot, its kernel
 and cramfs, byte for byte. openSpeakerPoint goes into stock's 9 MiB jffs2.img
@@ -363,6 +365,10 @@ class Box:
         if self.run(f"md5sum {path}").split()[0] != md5(data):
             raise IOError(f"{path} arrived corrupted")
 
+    def hw_reset(self):
+        """Reset through the EP93xx watchdog, a moment after this returns."""
+        self.run("sync; (sleep 1; devmem 0x80940000 32 0xaaaa) >/dev/null 2>&1 &", check=False)
+
     def booted_from_flash(self) -> bool:
         # What is mounted at / - not the command line, which carries the
         # kernel's built-in root= even on a netboot.
@@ -559,7 +565,7 @@ def do_install(ser, images: str, backups: str, host: str = None):
     print("  Booted from flash.")
 
     print("\n== Saving RedBoot's boot script ==")
-    con.hw_reset()
+    Box(ip).hw_reset()
     if not rb.interrupt(timeout=60):
         sys.exit("error: lost RedBoot after the reset")
     set_boot_script(rb)
@@ -569,6 +575,92 @@ def do_install(ser, images: str, backups: str, host: str = None):
     print("\n  Installed. The SpeakerPoint now boots openSpeakerPoint from flash; settings persist in /data.")
     print("  Return to stock any time: the dashboard's Settings, MQTT cmd/system/restore, or")
     print(f"  ./spflash.py restore --host <ip>. Full NOR backup: {os.path.join(backups, unit)}")
+
+
+UPDATE_RAM_PHASE = r"""#!/bin/sh
+# spflash update, RAM phase. Nothing below may touch the flash rootfs.
+W=/tmp/osp-update
+LD=$W/lib/ld-musl-arm.so.1
+bb() { $LD --library-path $W/lib $W/bin/busybox "$@"; }
+say() { echo "osp-update: $*" | bb tee -a $W/log > /dev/console; }
+fail() { say "FAILED: $* - reinstall over serial (spflash.py install)"; exit 1; }
+trap '' HUP INT TERM
+for p in /proc/[0-9]*; do
+	pid=${p#/proc/}
+	[ "$pid" = 1 ] || [ "$pid" = $$ ] || bb kill -9 "$pid" 2>/dev/null
+done
+bb sync
+bb umount /data 2>/dev/null
+for part in $PARTS; do
+	label=${part%%:*}; rest=${part#*:}; mtd=${rest%%:*}; rest=${rest#*:}; blocks=${rest%%:*}; md5=${rest#*:}
+	say "writing $label"
+	$LD --library-path $W/lib $W/bin/flash_erase -q /dev/$mtd 0 $blocks || fail "erase $label"
+	bb dd if=$W/$label.img of=/dev/$mtd bs=4096 2>/dev/null || fail "write $label"
+	len=$(bb wc -c < $W/$label.img)
+	got=$(bb head -c $len /dev/$mtd | bb md5sum | bb cut -d' ' -f1)
+	[ "$got" = "$md5" ] || fail "$label reads back $got, expected $md5"
+done
+say "update written and verified - rebooting"
+bb sync
+bb devmem 0x80940000 32 0xaaaa
+"""
+
+
+def do_update(host: str, images: str):
+    """Write a new kernel and rootfs to an installed box, over SSH.
+
+    The box runs from osp-rootfs, so the writes happen from a RAM phase:
+    images and tools go to /tmp first, everything else is stopped, then the
+    partitions are erased, written and read back, and the box resets.
+    """
+    parts = {"osp-kernel": open(os.path.join(images, KERNEL_IMG), "rb").read(),
+             "osp-rootfs": open(os.path.join(images, ROOTFS_IMG), "rb").read()}
+    box = Box(host)
+    if not box.booted_from_flash():
+        sys.exit("error: this box is not running from flash (not installed?) - use install")
+    plan = []
+    for label, data in parts.items():
+        mtd = box.run(f"""sed -n 's/^mtd\\([0-9]*\\): .* "{label}"$/\\1/p' /proc/mtd""")
+        if not mtd.isdigit():
+            sys.exit(f"error: no {label} partition")
+        size = int(box.run(f"cat /sys/class/mtd/mtd{mtd}/size"))
+        erase = int(box.run(f"cat /sys/class/mtd/mtd{mtd}/erasesize"))
+        if len(data) > size:
+            sys.exit(f"error: {label} image is {len(data)} bytes, partition {size}")
+        plan.append(f"{label}:mtd{mtd}:{-(-len(data) // erase)}:{md5(data)}")
+        print(f"  {label}: {len(data)} bytes -> mtd{mtd} ({md5(data)})")
+
+    print("  Stopping services and staging the images in RAM...")
+    box.run("for s in S99shairport-sync S61speakerpoint-control S58mpd S50mosquitto S50crond S90httpd; do "
+            "[ -x /etc/init.d/$s ] && /etc/init.d/$s stop; done >/dev/null 2>&1; sync; "
+            "echo 3 > /proc/sys/vm/drop_caches; rm -rf /tmp/osp-update; mkdir -p /tmp/osp-update/bin /tmp/osp-update/lib",
+            check=False)
+    for label, data in parts.items():
+        box.put(data, f"/tmp/osp-update/{label}.img")
+    # The RAM phase's tools, with everything they link against.
+    box.run("cd /tmp/osp-update && cp /lib/ld-musl-arm.so.1 lib/ && for t in busybox flash_erase; do "
+            "b=$(command -v $t) && cp $b bin/ && /lib/ld-musl-arm.so.1 --list $b | "
+            "sed -n 's/.*=> \\([^ ]*\\).*/\\1/p' | while read l; do cp -n $l lib/ 2>/dev/null; done; done")
+    box.put(UPDATE_RAM_PHASE.encode(), "/tmp/osp-update/run")
+    print("  Handing over to the RAM phase (the box writes, verifies and reboots)...")
+    box.run(f"PARTS='{' '.join(plan)}' setsid /tmp/osp-update/lib/ld-musl-arm.so.1 --library-path /tmp/osp-update/lib "
+            f"/tmp/osp-update/bin/busybox sh /tmp/osp-update/run </dev/null >/dev/null 2>&1 &", check=False)
+
+    time.sleep(20)
+    for _ in range(60):
+        try:
+            b = Box(host)
+            got = {label: b.run(f"head -c {len(data)} /dev/mtd{p.split(':')[1][3:]} | md5sum").split()[0]
+                   for (label, data), p in zip(parts.items(), plan)}
+            if all(got[label] == md5(data) for label, data in parts.items()) and b.booted_from_flash():
+                print(f"  Updated: back up from flash with the new kernel and rootfs ({b.run('uname -r')}).")
+                return
+            sys.exit(f"error: the box came back but its partitions do not match: {got}")
+        except SystemExit:
+            raise
+        except Exception:
+            time.sleep(10)
+    sys.exit("error: the box did not come back after the update - check the console")
 
 
 def do_backup(host: str, backups: str):
@@ -609,9 +701,9 @@ def pick_port() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Install, netboot, back up or restore the SpeakerPoint.")
-    ap.add_argument("mode", nargs="?", choices=["netboot", "install", "backup", "restore"], default="netboot",
+    ap.add_argument("mode", nargs="?", choices=["netboot", "install", "update", "backup", "restore"], default="netboot",
                     help="netboot = run from RAM (default); install = persistent install; "
-                         "backup/restore = against a running openSpeakerPoint (--host)")
+                         "update/backup/restore = against a running openSpeakerPoint (--host)")
     ap.add_argument("--images", default="output/images", help="directory with built images")
     ap.add_argument("--backups", default="backups", help="where NOR backups are kept (never committed)")
     ap.add_argument("--host", help="IP of a running openSpeakerPoint (backup, restore; install: "
@@ -625,9 +717,11 @@ def main() -> None:
         for p in list_ports.comports():
             print(f"{p.device}  -  {p.description}")
         return
-    if args.mode in ("backup", "restore"):
+    if args.mode in ("backup", "restore", "update"):
         if not args.host:
             sys.exit(f"error: {args.mode} needs --host <ip of the running openSpeakerPoint>")
+        if args.mode == "update":
+            return do_update(args.host, args.images)
         return do_backup(args.host, args.backups) if args.mode == "backup" else do_restore(args.host)
 
     port = args.port or pick_port()
