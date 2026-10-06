@@ -170,9 +170,12 @@ do_apply() {
 		mix sset "$c" 0% mute
 	done
 	# Line-in is only unmuted into the mix when it's the selected source.
-	if [ "$source" != linein ]; then
-		mix sset Line 0% mute
-	fi
+	# Line's analog mixer path stays muted in every mode, line-in included:
+	# line-in reaches the outputs only through the capture -> alsaloop -> PCM
+	# loop, where the volume and the S/PDIF amp apply. Unmuting it as well
+	# (as line-in mode once did) added an analog copy to the RCA output 50ms
+	# ahead of the looped one - an echo/comb filter.
+	mix sset Line 0% mute
 
 	# --- analog stage: Master/Front ---
 	# The STAC9758's S/PDIF transmitter takes its data AFTER the Master/Front
@@ -208,8 +211,11 @@ do_apply() {
 
 	# --- capture path (line-in loopback): mixer side ---
 	if [ "$source" = linein ]; then
-		mix sset Line 80% unmute
-		mix sset Capture 80% cap
+		# Record gain 0dB. Measured from the HC-800's line out: a -6dBFS
+		# tone arrives at -10dBFS RMS / -7dBFS peak with 0.01% THD, so a
+		# full-scale source peaks just under 0dBFS. The old 80% (+18dB)
+		# clipped ordinary music into a square wave.
+		mix sset Capture 0% cap
 		mix cset "'name=Capture Source'" Line
 	fi
 	mix_flush
