@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Cable,
   Speaker,
@@ -51,6 +51,19 @@ export function PlaybackWidget({ onOpenNowPlaying, className }: PlaybackWidgetPr
 
   const [localVolume, setLocalVolume] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // Volume is live while dragging (a change is one amp register write on the
+  // box), throttled; the release always sends the final value.
+  const lastSent = useRef(0);
+  const sendVolume = (v: number, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastSent.current < 100) return;
+    lastSent.current = now;
+    volume.mutate(v);
+  };
+  const release = () => {
+    if (dragging) sendVolume(localVolume, true);
+    setDragging(false);
+  };
   useEffect(() => {
     if (!dragging) setLocalVolume(current?.volume ?? 0);
   }, [current?.volume, dragging]);
@@ -144,17 +157,14 @@ export function PlaybackWidget({ onOpenNowPlaying, className }: PlaybackWidgetPr
           value={localVolume}
           disabled={!state.isSuccess || muted}
           onChange={(e) => {
+            const v = Number(e.target.value);
             setDragging(true);
-            setLocalVolume(Number(e.target.value));
+            setLocalVolume(v);
+            sendVolume(v);
           }}
-          onMouseUp={() => {
-            setDragging(false);
-            volume.mutate(localVolume);
-          }}
-          onTouchEnd={() => {
-            setDragging(false);
-            volume.mutate(localVolume);
-          }}
+          onPointerUp={release}
+          onKeyUp={release}
+          onBlur={release}
         />
       </div>
     </div>

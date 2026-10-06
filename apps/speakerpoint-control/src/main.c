@@ -302,6 +302,7 @@ int main(void)
             break;
         }
         player_tick();
+        audio_tick();
         mqtt_tick();
         if (n == 0) continue;   /* timeout only */
 

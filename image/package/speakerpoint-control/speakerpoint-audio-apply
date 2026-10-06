@@ -138,6 +138,10 @@ vol_db()     { set -- $(d2_vol_table "$1"); echo "$2"; }
 # --- the one declarative entry point ---------------------------------------
 do_apply() {
 	output="$1"; source="$2"; volume="$3"
+	# speakerpoint-control passes the exact amp word and codec dB for the
+	# volume (its curve, at 1% steps); by hand, the 5% table below stands in.
+	d2hex="${4:-}"; db="${5:-}"
+	[ -n "$db" ] || db=$(vol_db "$volume")
 
 	case "$output" in off|rca|amp|both) ;; *) warn "bad output '$output'"; return 1 ;; esac
 	case "$source" in media|linein) ;;    *) warn "bad source '$source'"; return 1 ;; esac
@@ -190,8 +194,13 @@ do_apply() {
 	#          instead of attenuating twice.
 	if [ "$analog" = yes ]; then
 		# Same taper as the amp, in dB (the codec clamps to its -46.5dB floor).
-		mix sset Master "$(vol_db "$volume")dB" unmute
-		mix sset Front  "$(vol_db "$volume")dB" unmute
+		if [ "$volume" -eq 0 ]; then
+			mix sset Master 0% mute
+			mix sset Front  0% mute
+		else
+			mix sset Master "${db}dB" unmute
+			mix sset Front  "${db}dB" unmute
+		fi
 		d2_volume=100
 	else
 		mix sset Master 100% mute
@@ -223,7 +232,10 @@ do_apply() {
 	# --- the D2 amp: its own registers, over I2C ---
 	if [ "$digital" = yes ]; then
 		d2_write "020001" "c00001"                 # amp input = S/PDIF
-		d2_write "000000" "$(d2_vol_hex "$d2_volume")" # amp master volume
+		if [ "$d2_volume" = 100 ] || [ -z "$d2hex" ]; then
+			d2hex=$(d2_vol_hex "$d2_volume")
+		fi
+		d2_write "000000" "$d2hex"                 # amp master volume
 	else
 		d2_write "000000" "000000"                 # amp hard mute
 	fi
@@ -340,13 +352,13 @@ do_status() {
 }
 
 case "${1:-}" in
-	apply)     do_apply "${2:-off}" "${3:-media}" "${4:-0}" ;;
+	apply)     do_apply "${2:-off}" "${3:-media}" "${4:-0}" "${5:-}" "${6:-}" ;;
 	status)    do_status ;;
 	tone)      tone_play "${2:-both}" ;;
 	tone-stop) tone_stop ;;
 	capture)   do_capture ;;
 	*)
-		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100>|status|tone <ch>|tone-stop|capture}" >&2
+		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100> [<d2hex> <dB>]|status|tone <ch>|tone-stop|capture}" >&2
 		exit 1
 		;;
 esac

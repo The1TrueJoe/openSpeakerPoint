@@ -11,7 +11,8 @@ void audio_reapply(void);           /* push the current state again (e.g. after 
 
 bool audio_valid_output(const char *mode);
 void audio_set_output(const char *mode);
-void audio_set_volume(int volume);  /* clamped 0-100 */
+void audio_set_volume(int volume);  /* clamped 0-100; volume only, no re-route */
+void audio_tick(void);              /* call about once a second: saves a settled volume */
 const char *audio_output(void);
 int audio_volume(void);
 
