@@ -171,13 +171,25 @@ do_apply() {
 		mix sset Line 0% mute
 	fi
 
-	# --- analog path (RCA) ---
+	# --- analog stage: Master/Front ---
+	# The STAC9758's S/PDIF transmitter takes its data AFTER the Master/Front
+	# attenuators (though before their mute switches) - measured: the amp got
+	# louder with Master raised while Master stayed muted, and a box that
+	# booted straight into "amp" (Master never set, so at the codec's 0% reset
+	# attenuation) played nothing at all. So:
+	#   amp  : Master/Front at 0 dB but muted (RCA silent), volume on the D2;
+	#   rca  : Master/Front at the volume, S/PDIF off;
+	#   both : Master/Front at the volume - which sets the S/PDIF level too -
+	#          and the D2 at 0 dB, so speakers and RCA follow one volume
+	#          instead of attenuating twice.
 	if [ "$analog" = yes ]; then
 		mix sset Master "${volume}%" unmute
 		mix sset Front  "${volume}%" unmute
+		d2_volume=100
 	else
-		mix sset Master mute
-		mix sset Front  mute
+		mix sset Master 100% mute
+		mix sset Front  100% mute
+		d2_volume="$volume"
 	fi
 
 	# --- digital path (S/PDIF -> D2 amp) ---
@@ -201,7 +213,7 @@ do_apply() {
 	# --- the D2 amp: its own registers, over I2C ---
 	if [ "$digital" = yes ]; then
 		d2_write "020001" "c00001"                 # amp input = S/PDIF
-		d2_write "000000" "$(d2_vol_hex "$volume")" # amp master volume
+		d2_write "000000" "$(d2_vol_hex "$d2_volume")" # amp master volume
 	else
 		d2_write "000000" "000000"                 # amp hard mute
 	fi
