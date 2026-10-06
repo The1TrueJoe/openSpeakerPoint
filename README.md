@@ -24,8 +24,10 @@ This is a work in progress. All features may not be fully functional.
 
 ## Control: MQTT
 
-`speakerpoint-control` is a client of the box's own mosquitto (port 1883, and
-websockets on 9001 for the web UI). Everything hangs off
+`speakerpoint-control` is a client of the box's own mosquitto (port 1883). The
+web UI speaks MQTT over websockets at `ws://<box>:8081/mqtt`, which
+speakerpoint-control relays to the broker (mosquitto's own websockets need
+OpenSSL, which doesn't fit the rootfs). Everything hangs off
 `openspeakerpoint/<hostname>`:
 
 | Topic | Payload |

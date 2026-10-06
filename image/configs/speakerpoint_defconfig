@@ -110,8 +110,9 @@ BR2_PACKAGE_MBEDTLS=y
 BR2_PACKAGE_SHAIRPORT_SYNC=y
 BR2_PACKAGE_MOSQUITTO=y
 BR2_PACKAGE_MOSQUITTO_BROKER=y
-# No websockets yet: in mosquitto 2.1 both implementations pull in OpenSSL,
+# No broker websockets: in mosquitto 2.1 both implementations pull in OpenSSL,
 # which takes the rootfs to 5.85 MB - past osp-rootfs (4.5 MiB).
+# speakerpoint-control relays the dashboard's websocket instead (wsbridge.c).
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 BR2_TARGET_ROOTFS_SQUASHFS_BS_1024K=y

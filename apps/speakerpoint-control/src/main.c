@@ -10,12 +10,16 @@
  *                                           MQTT state/library's rev changes)
  *   POST /api/upload?name=<f>               raw-body MP3 upload to USB
  *   GET  /api/albumart?file=<uri>           image bytes
+ *   GET  /mqtt (websocket)                  MQTT over websockets for the
+ *                                           dashboard, relayed to the broker
+ *                                           (wsbridge.h)
  */
 #include "audio.h"
 #include "airplay.h"
 #include "httpio.h"
 #include "mqtt.h"
 #include "player.h"
+#include "wsbridge.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -281,6 +285,7 @@ int main(void)
         FD_SET(server_fd, &rfds);
         int maxfd = server_fd;
         maxfd = mqtt_fdset(&rfds, &wfds, maxfd);
+        maxfd = ws_fdset(&rfds, maxfd);
 
         /* Optional media-engine fd, if it has one to watch. */
         int pfd = player_status_fd();
@@ -301,6 +306,7 @@ int main(void)
         if (n == 0) continue;   /* timeout only */
 
         mqtt_service(&rfds, &wfds);
+        ws_service(&rfds);
 
         if (pfd >= 0 && FD_ISSET(pfd, &rfds)) {
             player_poll();
@@ -318,7 +324,9 @@ int main(void)
             if (nread > 0) {
                 http_request_t req;
                 if (http_parse(req_buf, &req) == 0) {
-                    if (is(&req, "POST", "/api/upload")) {
+                    if (is(&req, "GET", WS_PATH) && ws_is_upgrade(req_buf)) {
+                        if (ws_accept(client_fd, req_buf) == 0) continue;   /* now a session */
+                    } else if (is(&req, "POST", "/api/upload")) {
                         /* A big file over a slow USB link can take a long
                          * time. This daemon is single-threaded/single-
                          * connection, so handling it inline would block the
@@ -344,6 +352,7 @@ int main(void)
                         pid_t pid = fork();
                         if (pid == 0) {
                             close(server_fd);
+                            ws_forget();
                             handle_upload(client_fd, &req, req_buf, nread);
                             close(client_fd);
                             _exit(0);
@@ -366,6 +375,7 @@ int main(void)
         }
     }
 
+    ws_close_all();
     mqtt_stop();
     close(server_fd);
     return 0;

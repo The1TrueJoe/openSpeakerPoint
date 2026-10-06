@@ -4,7 +4,9 @@ import type { DeviceState, NowPlaying, OutputMode, SourceMode } from "./types";
 
 /**
  * The dashboard's live channel: MQTT over websockets to the box's own
- * mosquitto (:9001). Everything that changes - routing, volume, now-playing,
+ * mosquitto, through speakerpoint-control's websocket bridge at :8081/mqtt
+ * (mosquitto's own websockets need OpenSSL, which doesn't fit). Everything
+ * that changes - routing, volume, now-playing,
  * the library's revision, restore availability - arrives as retained state, so
  * nothing here polls; commands go out on `<base>/cmd/...`. See
  * apps/speakerpoint-control/src/mqtt.h for the topic map.
@@ -54,7 +56,7 @@ export interface Snapshot {
 }
 
 const PREFIX = "openspeakerpoint";
-const BROKER = `ws://${window.location.hostname}:9001`;
+const BROKER = `ws://${window.location.hostname}:8081/mqtt`;
 
 let snap: Snapshot = { connected: false, base: null, online: false };
 const listeners = new Set<() => void>();
