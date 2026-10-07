@@ -1,58 +1,38 @@
 import { useCallback, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { command, useSnapshot } from "@/lib/mqtt";
 import type { PlaybackState, UploadItem } from "@/lib/types";
 
-/** Now-playing across whichever source is actually active (media/airplay/linein). */
+/** Now-playing across whichever source is actually active (media/airplay/linein),
+ * live over MQTT. */
 export function useNowPlaying() {
-  const qc = useQueryClient();
-
-  const now = useQuery({
-    queryKey: ["now"],
-    queryFn: api.getNowPlaying,
-    refetchInterval: (q) => (q.state.data?.state === "play" ? 1000 : 3000),
-  });
-
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["now"] });
-
-  const transport = useMutation({
-    mutationFn: (cmd: PlaybackState | "next" | "prev") => api.transport(cmd),
-    onSuccess: invalidate,
-  });
-
-  const seek = useMutation({
-    mutationFn: (seconds: number) => api.seek(seconds),
-    onSuccess: invalidate,
-  });
-
-  return { now, transport, seek };
+  const s = useSnapshot();
+  return {
+    now: { data: s.now },
+    transport: { mutate: (cmd: PlaybackState | "next" | "prev") => command("transport", cmd), isPending: false },
+    seek: { mutate: (seconds: number) => command("seek", Math.round(seconds)), isPending: false },
+  };
 }
 
+/** The USB library. Its contents come over REST (too big for a retained MQTT
+ * value), fetched again only when MQTT's state/library rev changes. */
 export function useLibrary() {
-  const qc = useQueryClient();
+  const s = useSnapshot();
+  const rev = s.library?.rev;
 
   const library = useQuery({
-    queryKey: ["library"],
+    queryKey: ["library", rev],
     queryFn: api.getLibrary,
-    refetchInterval: (q) => (q.state.data?.updating ? 1500 : false),
+    placeholderData: keepPreviousData,
   });
 
-  const play = useMutation({
-    mutationFn: (index: number) => api.playTrack(index),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["now"] }),
-  });
-
-  const rescan = useMutation({
-    mutationFn: () => api.rescan(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["library"] }),
-  });
-
-  const remove = useMutation({
-    mutationFn: (file: string) => api.deleteTrack(file),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["library"] }),
-  });
-
-  return { library, play, rescan, remove };
+  return {
+    library,
+    play: { mutate: (index: number) => command("play", index), isPending: false },
+    rescan: { mutate: () => command("library/rescan", 1), isPending: false },
+    remove: { mutate: (file: string) => command("library/delete", file), isPending: false },
+  };
 }
 
 /** Tracks a queue of in-flight uploads with per-file progress, independent

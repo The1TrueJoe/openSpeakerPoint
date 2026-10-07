@@ -8,8 +8,9 @@ SPEAKERPOINT_CONTROL_SITE = $(BR2_EXTERNAL_SPEAKERPOINT_PATH)/../apps/speakerpoi
 SPEAKERPOINT_CONTROL_SITE_METHOD = local
 SPEAKERPOINT_CONTROL_LICENSE = MIT
 
-# Runtime companions the control daemon shells out to / proxies.
-SPEAKERPOINT_CONTROL_DEPENDENCIES = alsa-utils i2c-tools mpd shairport-sync
+# Runtime companions the control daemon shells out to / proxies, and
+# libmosquitto for its MQTT client.
+SPEAKERPOINT_CONTROL_DEPENDENCIES = alsa-utils i2c-tools mpd shairport-sync mosquitto
 
 define SPEAKERPOINT_CONTROL_BUILD_CMDS
 	$(MAKE) $(TARGET_CONFIGURE_OPTS) -C $(@D) speakerpoint-control

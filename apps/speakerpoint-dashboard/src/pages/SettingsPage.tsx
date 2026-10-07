@@ -1,3 +1,5 @@
+import { MeasurePanel } from "@/components/MeasurePanel";
+import { RestorePanel } from "@/components/RestorePanel";
 import { TestTonePanel } from "@/components/TestTonePanel";
 
 export function SettingsPage() {
@@ -12,6 +14,8 @@ export function SettingsPage() {
 
       <div className="space-y-4">
         <TestTonePanel />
+        <MeasurePanel />
+        <RestorePanel />
       </div>
 
       <footer className="mt-8 text-center text-xs text-slate-600">

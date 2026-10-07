@@ -1,31 +1,25 @@
 /*
- * speakerpoint-control - HTTP control daemon for the SpeakerPoint.
+ * speakerpoint-control - control daemon for the SpeakerPoint.
  *
- * Exposes audio routing/volume/test-tones and (via MPD) USB MP3 playback
- * with metadata and album art, over a small JSON API consumed by the React
- * dashboard.
+ * Controls and live state are on MQTT, on the box's own mosquitto (mqtt.h);
+ * HTTP keeps only what MQTT carries badly, for the React dashboard:
  *
  *   GET  /api/health
- *   GET  /api/state                         { volume, output, source }
- *   POST /api/output?value=off|rca|amp|both
- *   POST /api/source?value=media|linein
- *   POST /api/volume?value=0-100
- *   POST /api/tone?channel=&type=&freq=
- *   POST /api/tone/stop
- *   GET  /api/now                           now-playing (media/airplay/linein)
- *   POST /api/transport?cmd=play|pause|stop|next|prev
- *   POST /api/seek?value=<seconds>
- *   GET  /api/library                       USB media library
- *   POST /api/play?index=<n>
- *   POST /api/rescan
- *   POST /api/delete?file=<path>
+ *   GET  /api/audio/status                  hardware readback (diagnostic text)
+ *   GET  /api/library                       USB media library (re-fetched when
+ *                                           MQTT state/library's rev changes)
  *   POST /api/upload?name=<f>               raw-body MP3 upload to USB
  *   GET  /api/albumart?file=<uri>           image bytes
+ *   GET  /mqtt (websocket)                  MQTT over websockets for the
+ *                                           dashboard, relayed to the broker
+ *                                           (wsbridge.h)
  */
 #include "audio.h"
 #include "airplay.h"
 #include "httpio.h"
+#include "mqtt.h"
 #include "player.h"
+#include "wsbridge.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -200,13 +194,6 @@ static void dispatch(int fd, const http_request_t *r)
         return;
     }
 
-    if (is(r, "GET", "/api/state")) {
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
     /* Actual hardware readback (mixer + AC97 + D2 amp registers), so a
      * mismatch between what we asked for and what the chips have is
      * directly visible instead of having to be inferred. */
@@ -214,91 +201,6 @@ static void dispatch(int fd, const http_request_t *r)
         char body[2048];
         audio_status_text(body, sizeof(body));
         http_send_binary(fd, "text/plain", body, strlen(body));
-        return;
-    }
-
-    if (is(r, "POST", "/api/output")) {
-        if (http_query(r->query, "value", val, sizeof(val)) || !audio_valid_output(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad output\"}");
-            return;
-        }
-        audio_set_output(val);
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/volume")) {
-        if (http_query(r->query, "value", val, sizeof(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"missing value\"}");
-            return;
-        }
-        audio_set_volume(atoi(val));
-        char body[128];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/source")) {
-        if (http_query(r->query, "value", val, sizeof(val)) || !audio_valid_source(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"bad source\"}");
-            return;
-        }
-        audio_set_source(val);
-        char body[160];
-        audio_state_json(body, sizeof(body));
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/tone")) {
-        char ch[16] = "both";
-        http_query(r->query, "channel", ch, sizeof(ch));
-        audio_tone(ch);
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/tone/stop")) {
-        audio_tone_stop();
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "GET", "/api/now")) {
-        char body[2048];
-        if (airplay_active()) {
-            airplay_now_json(body, sizeof(body));
-        } else if (!strcmp(audio_source(), "linein")) {
-            snprintf(body, sizeof(body),
-                     "{\"source\":\"linein\",\"state\":\"play\",\"file\":null,"
-                     "\"title\":null,\"artist\":null,\"album\":null,\"elapsed\":0,"
-                     "\"duration\":0,\"hasArt\":false}");
-        } else {
-            player_now_json(body, sizeof(body));
-        }
-        http_send_json(fd, 200, "OK", body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/transport")) {
-        if (http_query(r->query, "cmd", val, sizeof(val)) || player_transport(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"transport failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/seek")) {
-        if (http_query(r->query, "value", val, sizeof(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"missing value\"}");
-            return;
-        }
-        player_seek(atoi(val));
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
         return;
     }
 
@@ -311,30 +213,6 @@ static void dispatch(int fd, const http_request_t *r)
         player_library_json(body, LIBRARY_BUF_SIZE);
         http_send_json(fd, 200, "OK", body);
         free(body);
-        return;
-    }
-
-    if (is(r, "POST", "/api/play")) {
-        if (http_query(r->query, "index", val, sizeof(val)) || player_play_index(atoi(val))) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"play failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/rescan")) {
-        player_rescan();
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
-        return;
-    }
-
-    if (is(r, "POST", "/api/delete")) {
-        if (http_query(r->query, "file", val, sizeof(val)) || player_delete_track(val)) {
-            http_send_json(fd, 400, "Bad Request", "{\"ok\":false,\"error\":\"delete failed\"}");
-            return;
-        }
-        http_send_json(fd, 200, "OK", "{\"ok\":true}");
         return;
     }
 
@@ -371,6 +249,7 @@ int main(void)
     audio_apply_startup();
     player_start();
     airplay_start();
+    mqtt_start();
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -400,10 +279,13 @@ int main(void)
     }
 
     while (keep_running) {
-        fd_set rfds;
+        fd_set rfds, wfds;
         FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
         FD_SET(server_fd, &rfds);
         int maxfd = server_fd;
+        maxfd = mqtt_fdset(&rfds, &wfds, maxfd);
+        maxfd = ws_fdset(&rfds, maxfd);
 
         /* Optional media-engine fd, if it has one to watch. */
         int pfd = player_status_fd();
@@ -414,13 +296,18 @@ int main(void)
 
         /* 1s timeout so player_tick() runs even when nothing else happens. */
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-        int n = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        int n = select(maxfd + 1, &rfds, &wfds, NULL, &tv);
         if (n < 0) {
             if (errno == EINTR) continue;
             break;
         }
         player_tick();
+        audio_tick();
+        mqtt_tick();
         if (n == 0) continue;   /* timeout only */
+
+        mqtt_service(&rfds, &wfds);
+        ws_service(&rfds);
 
         if (pfd >= 0 && FD_ISSET(pfd, &rfds)) {
             player_poll();
@@ -438,7 +325,9 @@ int main(void)
             if (nread > 0) {
                 http_request_t req;
                 if (http_parse(req_buf, &req) == 0) {
-                    if (is(&req, "POST", "/api/upload")) {
+                    if (is(&req, "GET", WS_PATH) && ws_is_upgrade(req_buf)) {
+                        if (ws_accept(client_fd, req_buf) == 0) continue;   /* now a session */
+                    } else if (is(&req, "POST", "/api/upload")) {
                         /* A big file over a slow USB link can take a long
                          * time. This daemon is single-threaded/single-
                          * connection, so handling it inline would block the
@@ -464,6 +353,7 @@ int main(void)
                         pid_t pid = fork();
                         if (pid == 0) {
                             close(server_fd);
+                            ws_forget();
                             handle_upload(client_fd, &req, req_buf, nread);
                             close(client_fd);
                             _exit(0);
@@ -476,6 +366,7 @@ int main(void)
                         handle_upload(client_fd, &req, req_buf, nread);
                     } else {
                         dispatch(client_fd, &req);
+                        mqtt_sync();   /* a REST change shows on MQTT at once */
                     }
                 } else {
                     http_send_json(client_fd, 400, "Bad Request", "{\"ok\":false}");
@@ -485,6 +376,8 @@ int main(void)
         }
     }
 
+    ws_close_all();
+    mqtt_stop();
     close(server_fd);
     return 0;
 }

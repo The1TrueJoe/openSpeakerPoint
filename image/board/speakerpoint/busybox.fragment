@@ -1,2 +1,8 @@
 # Enable devmem for S01z-ep93xx-reset's SYSCON reboot
 CONFIG_DEVMEM=y
+# On-device return to stock (osp-restore): unpack the xz payload into the
+# re-created stock jffs2, verify it, and checksum what was written.
+CONFIG_TAR=y
+CONFIG_FEATURE_SEAMLESS_XZ=y
+CONFIG_UNXZ=y
+CONFIG_MD5SUM=y

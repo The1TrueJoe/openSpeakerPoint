@@ -18,3 +18,5 @@ venv/
 .idea/
 .vscode/
 .claude/
+# Flash dumps of real units: vendor firmware, never committed.
+backups/

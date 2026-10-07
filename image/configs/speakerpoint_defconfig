@@ -27,6 +27,16 @@ BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoi
 # BR2_EXTERNAL package dirs aren't scanned for patches by name alone.
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/package"
 BR2_LINUX_KERNEL=y
+# Pinned. The AC97/DMA path is out-of-tree code on a board nobody upstream
+# tests: 7.1.4 played audio, while 7.2.9 (what an unpinned Buildroot master
+# picked up in October 2026) fails every PCM open with a silent EINVAL - the
+# DMA channels never attach. 7.1.8 is also what openHC runs.
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.8"
+# The toolchain takes its headers from that kernel, and Buildroot checks the
+# declared series against it exactly.
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_7_1=y
 BR2_LINUX_KERNEL_DEFCONFIG="ep93xx"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/linux.fragment"
 # XZ compresses noticeably better than gzip (RAM is no constraint at
@@ -38,6 +48,9 @@ BR2_LINUX_KERNEL_APPENDED_ZIMAGE=y
 BR2_LINUX_KERNEL_CUSTOM_DTS_DIR="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/dts-overlay"
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="cirrus/ep93xx-speakerpoint"
 BR2_PACKAGE_MTD=y
+BR2_PACKAGE_MTD_FLASH_ERASE=y
+BR2_PACKAGE_MTD_FLASHCP=y
+BR2_PACKAGE_MTD_MTDPART=y
 BR2_PACKAGE_BUSYBOX_HTTPD=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_SPEAKERPOINT_PATH)/board/speakerpoint/busybox.fragment"
 # Client tools (dbclient/ssh) default to on but are never invoked on-device -
@@ -95,8 +108,14 @@ BR2_PACKAGE_MPD_ID3TAG=y
 # stream makes the daemon stop MPD and hand the device over.
 BR2_PACKAGE_MBEDTLS=y
 BR2_PACKAGE_SHAIRPORT_SYNC=y
+BR2_PACKAGE_MOSQUITTO=y
+BR2_PACKAGE_MOSQUITTO_BROKER=y
+# No broker websockets: in mosquitto 2.1 both implementations pull in OpenSSL,
+# which takes the rootfs to 5.85 MB - past osp-rootfs (4.5 MiB).
+# speakerpoint-control relays the dashboard's websocket instead (wsbridge.c).
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
+BR2_TARGET_ROOTFS_SQUASHFS_BS_1024K=y
 # BR2_TARGET_ROOTFS_TAR is not set
 # Also build a gzip cpio image of the same rootfs, for use as a RedBoot
 # TFTP-loaded initramfs (see tools/tftp-serve.sh). This lets a whole new

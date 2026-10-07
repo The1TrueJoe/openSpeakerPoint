@@ -10,6 +10,7 @@
  */
 #include "player.h"
 #include "airplay.h"
+#include "audio.h"
 #include "jsonutil.h"
 
 #include <arpa/inet.h>
@@ -364,6 +365,20 @@ int player_delete_track(const char *path)
 /* ------------------------------------------------------------------ */
 /* Status / library                                                   */
 /* ------------------------------------------------------------------ */
+void now_playing_json(char *out, size_t out_len)
+{
+    if (airplay_active()) {
+        airplay_now_json(out, out_len);
+    } else if (!strcmp(audio_source(), "linein")) {
+        snprintf(out, out_len,
+                 "{\"source\":\"linein\",\"state\":\"play\",\"file\":null,"
+                 "\"title\":null,\"artist\":null,\"album\":null,\"elapsed\":0,"
+                 "\"duration\":0,\"hasArt\":false}");
+    } else {
+        player_now_json(out, out_len);
+    }
+}
+
 void player_now_json(char *out, size_t out_len)
 {
     conn_t c;
@@ -422,6 +437,29 @@ static int usb_present(void)
     }
     closedir(d);
     return any;
+}
+
+void player_library_state_json(char *out, size_t out_len)
+{
+    conn_t c;
+    char line[256];
+    int updating = 0;
+    long rev = 0;
+
+    if (conn_open(&c) == 0) {
+        conn_send(&c, "status\nstats\n");
+        int oks = 0;
+        while (oks < 2 && conn_line(&c, line, sizeof(line)) == 0) {
+            if (!strcmp(line, "OK")) { oks++; continue; }
+            if (!strncmp(line, "ACK", 3)) break;
+            if (!strncmp(line, "updating_db:", 12)) updating = 1;
+            if (!strncmp(line, "db_update: ", 11)) rev = atol(line + 11);
+        }
+        conn_close(&c);
+    }
+    if (time(NULL) - s_rescan_at < 6) updating = 1;
+    snprintf(out, out_len, "{\"usb\":%s,\"updating\":%s,\"rev\":%ld}",
+             usb_present() ? "true" : "false", updating ? "true" : "false", rev);
 }
 
 void player_library_json(char *out, size_t out_len)

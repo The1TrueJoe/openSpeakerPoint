@@ -1,21 +1,145 @@
 #include "audio.h"
 #include "player.h"
 
+#include <fcntl.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <time.h>
+#include <unistd.h>
 
-#define STATE_PATH "/var/run/speakerpoint-control.state"
+/* /data is the osp-data jffs2 on an installed box (S03osp-data), tmpfs on a
+ * netbooted one, so settings survive a power cycle exactly when the box is
+ * installed. */
+#define STATE_PATH "/data/speakerpoint-control.state"
 #define APPLY_BIN "/usr/bin/speakerpoint-audio-apply"
 
-/* Defaults for a fresh boot: STATE_PATH lives on tmpfs, so it's gone after
- * every power cycle and these are what the device actually comes up with.
- * "both" (not "off") so audio works out of the box without having to pick an
- * output first. */
+/* The D2-41051 amp (speakers): master volume register 0x000000, a signed
+ * 24-bit gain where 0x800000 is 0 dB. */
+#define D2_I2C "/dev/i2c-0"
+#define D2_ADDR 0x59
+/* The codec's Master/Front attenuators bottom out here. */
+#define CODEC_FLOOR_DB -46.5
+/* A volume drag sends many changes; write the state file once it settles. */
+#define SAVE_DELAY_S 2
+
+/* Defaults for a first boot (or a netboot, where /data is tmpfs). "both"
+ * (not "off") so audio works out of the box without having to pick an output
+ * first. */
 static int s_volume = 70;
 static char s_output[8] = "both";
 static char s_source[8] = "media";
+
+/* Tone on the amp's own DSP — the controls Control4's spserver drove, found by
+ * disassembling it (stock jffs2, /control4/bin/spserver): on a DAE-4 part
+ * (reg 0x020003 == 0x050101, which this D2-41051 is) bass is registers
+ * 0x00000B/0x00000F (left/right), treble 0x00000D/0x000011, loudness
+ * 0x0000DB/0x0000DE (1 on, 0 off). Bass and treble take spserver's
+ * toneGainTable, 29 steps, flat in the middle; entry 0 is the most boost
+ * (confirmed by ear), so a setting v in -14..14 is entry 14 - v. */
+#define TONE_STEPS 14
+static const unsigned TONE_GAIN[2 * TONE_STEPS + 1] = {
+    0x7fffff, 0x6ef051, 0x5f64f0, 0x518a50, 0x453160, 0x3a3031, 0x30615f, 0x27a39a, 0x1fd930, 0x18e7aa,
+    0x12b771, 0x0d3381, 0x08491d, 0x03e793, 0x000000, 0xfc8521, 0xf96b24, 0xf6a77e, 0xf430ce, 0xf1feb4,
+    0xf009ba, 0xee4b3c, 0xecbd4c, 0xeb5aa2, 0xea1e8a, 0xe904d2, 0xe809bd, 0xe729f6, 0xe66285,
+};
+#define D2_BASS_L 0x00000B
+#define D2_BASS_R 0x00000F
+#define D2_TREBLE_L 0x00000D
+#define D2_TREBLE_R 0x000011
+#define D2_LOUD_L 0x0000DB
+#define D2_LOUD_R 0x0000DE
+
+static int s_bass, s_treble;      /* -14..14 */
+static bool s_loudness;
+
+static bool s_dirty;
+static time_t s_changed_at;
+
+/* The volume curve, the one place it lives: an audio taper, gain = (v/100)^2,
+ * i.e. 40*log10(100/v) dB of attenuation (60% -> -8.9 dB, 10% -> -40 dB), 0 =
+ * mute. The apply script gets the resulting values rather than working them
+ * out itself (it has only a 5%-step table, for running it by hand). */
+static unsigned d2_word(int v)
+{
+    if (v <= 0) return 0;                   /* full cut */
+    double g = (v / 100.0) * (v / 100.0);
+    long x = lround(g * 8388608.0);         /* 2^23 */
+    return (unsigned)(0x1000000L - x) & 0xffffff;
+}
+
+static double vol_db(int v)
+{
+    if (v <= 0) return -100.0;
+    double db = -40.0 * log10(100.0 / v);
+    if (db > -0.05) return 0.0;             /* print "0.0", not "-0.0" */
+    return db < CODEC_FLOOR_DB ? CODEC_FLOOR_DB : db;
+}
+
+/* One register write to the amp, straight over i2c-dev: microseconds, where
+ * the apply script's i2ctransfer + mixer batch takes seconds on this CPU. */
+static int d2_write(unsigned reg, unsigned val)
+{
+    unsigned char b[6] = {
+        (unsigned char)(reg >> 16), (unsigned char)(reg >> 8), (unsigned char)reg,
+        (unsigned char)(val >> 16), (unsigned char)(val >> 8), (unsigned char)val,
+    };
+    struct i2c_msg msg = { .addr = D2_ADDR, .flags = 0, .len = sizeof(b), .buf = b };
+    struct i2c_rdwr_ioctl_data x = { .msgs = &msg, .nmsgs = 1 };
+    int fd = open(D2_I2C, O_RDWR);
+    if (fd < 0) return -1;
+    int r = ioctl(fd, I2C_RDWR, &x);
+    close(fd);
+    return r < 0 ? -1 : 0;
+}
+
+/* The codec's Master and Front (RCA, and the S/PDIF feed in "both"), in one
+ * amixer process. */
+static void codec_volume(int v)
+{
+    FILE *p = popen("amixer -c0 -q -s >/dev/null 2>&1", "w");
+    if (!p) return;
+    if (v <= 0) {
+        fputs("sset Master 0% mute\nsset Front 0% mute\n", p);
+    } else {
+        double db = vol_db(v);
+        fprintf(p, "sset Master %.1fdB unmute\nsset Front %.1fdB unmute\n", db, db);
+    }
+    pclose(p);
+}
+
+/* Volume alone, without re-applying the routing: on the amp in "amp" mode,
+ * on the codec where the analog path is live (the amp then sits at 0 dB). */
+static void volume_hw(void)
+{
+    if (!strcmp(s_output, "amp")) {
+        if (d2_write(0x000000, d2_word(s_volume)) < 0)
+            fprintf(stderr, "speakerpoint-control: D2 volume write failed\n");
+    } else if (!strcmp(s_output, "rca") || !strcmp(s_output, "both")) {
+        codec_volume(s_volume);
+    }
+}
+
+static int clamp_tone(int v)
+{
+    return v < -TONE_STEPS ? -TONE_STEPS : v > TONE_STEPS ? TONE_STEPS : v;
+}
+
+/* Bass, treble and loudness onto the amp (both channels each). */
+static void tone_hw(void)
+{
+    unsigned b = TONE_GAIN[TONE_STEPS - s_bass], t = TONE_GAIN[TONE_STEPS - s_treble];
+    unsigned l = s_loudness ? 1 : 0;
+    if (d2_write(D2_BASS_L, b) < 0 || d2_write(D2_BASS_R, b) < 0 ||
+        d2_write(D2_TREBLE_L, t) < 0 || d2_write(D2_TREBLE_R, t) < 0 ||
+        d2_write(D2_LOUD_L, l) < 0 || d2_write(D2_LOUD_R, l) < 0)
+        fprintf(stderr, "speakerpoint-control: D2 tone write failed\n");
+}
 
 static int clamp_volume(int v)
 {
@@ -40,6 +164,16 @@ const char *audio_source(void)
     return s_source;
 }
 
+const char *audio_output(void)
+{
+    return s_output;
+}
+
+int audio_volume(void)
+{
+    return s_volume;
+}
+
 static void run_apply(const char *fmt, ...)
 {
     char cmd[256];
@@ -61,14 +195,15 @@ static void run_apply(const char *fmt, ...)
  * control still read back as unmuted). */
 static void apply_all(void)
 {
-    run_apply("apply %s %s %d", s_output, s_source, s_volume);
+    run_apply("apply %s %s %d %06x %.1f", s_output, s_source, s_volume, d2_word(s_volume), vol_db(s_volume));
+    tone_hw();
 }
 
 static void save_state(void)
 {
     FILE *f = fopen(STATE_PATH, "w");
     if (!f) return;
-    fprintf(f, "%d %s %s\n", s_volume, s_output, s_source);
+    fprintf(f, "%d %s %s %d %d %d\n", s_volume, s_output, s_source, s_bass, s_treble, s_loudness ? 1 : 0);
     fclose(f);
 }
 
@@ -78,7 +213,8 @@ void audio_load(void)
     if (!f) return;
     int volume;
     char output[8], source[8];
-    int n = fscanf(f, "%d %7s %7s", &volume, output, source);
+    int bass = 0, treble = 0, loud = 0;
+    int n = fscanf(f, "%d %7s %7s %d %d %d", &volume, output, source, &bass, &treble, &loud);
     if (n >= 2) {
         s_volume = clamp_volume(volume);
         if (audio_valid_output(output)) {
@@ -88,10 +224,20 @@ void audio_load(void)
     if (n >= 3 && audio_valid_source(source)) {
         snprintf(s_source, sizeof(s_source), "%s", source);
     }
+    if (n >= 6) {
+        s_bass = clamp_tone(bass);
+        s_treble = clamp_tone(treble);
+        s_loudness = loud != 0;
+    }
     fclose(f);
 }
 
 void audio_apply_startup(void)
+{
+    apply_all();
+}
+
+void audio_reapply(void)
 {
     apply_all();
 }
@@ -107,8 +253,44 @@ void audio_set_output(const char *mode)
 void audio_set_volume(int volume)
 {
     s_volume = clamp_volume(volume);
-    apply_all();
+    volume_hw();
+    s_dirty = true;
+    s_changed_at = time(NULL);
+}
+
+void audio_set_bass(int v)
+{
+    s_bass = clamp_tone(v);
+    tone_hw();
+    s_dirty = true;
+    s_changed_at = time(NULL);
+}
+
+void audio_set_treble(int v)
+{
+    s_treble = clamp_tone(v);
+    tone_hw();
+    s_dirty = true;
+    s_changed_at = time(NULL);
+}
+
+void audio_set_loudness(bool on)
+{
+    s_loudness = on;
+    tone_hw();
     save_state();
+}
+
+int audio_bass(void) { return s_bass; }
+int audio_treble(void) { return s_treble; }
+bool audio_loudness(void) { return s_loudness; }
+
+void audio_tick(void)
+{
+    if (s_dirty && time(NULL) - s_changed_at >= SAVE_DELAY_S) {
+        save_state();
+        s_dirty = false;
+    }
 }
 
 void audio_set_source(const char *src)

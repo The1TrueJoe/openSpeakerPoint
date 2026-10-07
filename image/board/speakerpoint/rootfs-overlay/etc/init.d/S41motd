@@ -32,7 +32,10 @@ if [ -z "$ip_address" ]; then
 	ip_address="unavailable"
 fi
 
-cat > /etc/motd <<'EOF'
+# /etc/motd is a link to /run/motd (post-build.sh): the root is read-only.
+# Nothing here may prompt - an interactive mv here once held boot for ten
+# minutes, waiting on the serial console for an answer.
+cat > /run/motd.in <<'EOF'
    _____                  __                         _       __ 
   / ___/____  ___  ____ _/ /_____  _________  ____  (_)___  / /_
   \__ \/ __ \/ _ \/ __ `/ //_/ _ \/ ___/ __ \/ __ \/ / __ \/ __/
@@ -46,6 +49,7 @@ View the web configuration at http://__IP_ADDRESS__
 
 EOF
 
-sed "s/__IP_ADDRESS__/$ip_address/" /etc/motd > /tmp/.motd && mv /tmp/.motd /etc/motd
+sed "s/__IP_ADDRESS__/$ip_address/" /run/motd.in > /run/motd.new && mv -f /run/motd.new /run/motd
+rm -f /run/motd.in
 
 exit 0

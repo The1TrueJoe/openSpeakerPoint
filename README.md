@@ -9,17 +9,49 @@ This is a work in progress. All features may not be fully functional.
 ## Current Implemented Features
 
 - SSH access
-- React Web UI
-- Speaker and RCA Audio test tones
-- USB Playback
-- USB Media Detection and Hotplug
+- MQTT control (on the box's own mosquitto) and a React web UI that speaks it
+- Speaker and RCA audio test tones, and a line-in level/frequency measurement
+- USB playback, media detection and hotplug
+- AirPlay 1
+- Persistent install that keeps stock's bootloader, kernel and rootfs untouched
+- Return to stock Control4 from the box itself (no serial cable needed)
 
 ## Planned Features
 
 (If I can get around to it)
 
-- Airplay 1
 - Spotify Connect
+
+## Control: MQTT
+
+`speakerpoint-control` is a client of the box's own mosquitto (port 1883). The
+web UI speaks MQTT over websockets at `ws://<box>:8081/mqtt`, which
+speakerpoint-control relays to the broker (mosquitto's own websockets need
+OpenSSL, which doesn't fit the rootfs). Everything hangs off
+`openspeakerpoint/<hostname>`:
+
+| Topic | Payload |
+|---|---|
+| `status` | `online` / `offline` (retained; offline is the last will) |
+| `state/audio/output` | `off` `rca` `amp` `both` (retained) |
+| `state/audio/source` | `media` `linein` (retained) |
+| `state/audio/volume` | 0-100 (retained) |
+| `state/now` | now-playing JSON (retained) |
+| `state/library` | `{usb, updating, rev}` - re-fetch `GET /api/library` when `rev` changes |
+| `state/system/restore` | `{available, state}` |
+| `cmd/audio/output` / `source` / `volume` | as above |
+| `cmd/transport` | `play` `pause` `stop` `next` `prev` |
+| `cmd/seek`, `cmd/play` | seconds, library index |
+| `cmd/library/rescan`, `cmd/library/delete` | -, a `/media/usb` path |
+| `cmd/tone` | `left` `right` `both` `stop` |
+| `cmd/audio/measure` | seconds (1-10) -> `event/audio/measure` with per-channel RMS/peak dBFS and frequency |
+| `cmd/system/restore` | `confirm` -> back to stock Control4 (the box reboots) |
+| `error` | `{topic, message}` for a rejected command |
+
+State is retained, events are not; scalars are bare and structured values are
+JSON. HTTP (port 8081) keeps only what MQTT carries badly: `GET /api/library`,
+`POST /api/upload`, `GET /api/albumart`, plus `GET /api/health` and
+`GET /api/audio/status` (a hardware readback for diagnostics).
 
 ## Building
 
@@ -87,33 +119,63 @@ root
 speakerpoint
 ```
 
-## Automated flashing / netboot over RS232 (`spflash.py`)
+## Install, back up and restore (`spflash.py`)
 
-The manual RedBoot + TFTP dance above works, but `spflash.py` automates the
-whole thing over just the serial cable — no TFTP server or network setup. It
-drives the RedBoot console, transfers the images with YMODEM, and either boots
-from RAM or writes NOR flash.
+`spflash.py` drives RedBoot over the RS232 console (YMODEM, so no TFTP server)
+and talks to the running system over SSH.
 
 ```sh
-python3 -m pip install -r requirements.txt   # pyserial
+python3 -m pip install -r requirements.txt   # pyserial, paramiko
 
-# Boot the freshly built image from RAM (nothing written to flash):
-./spflash.py netboot
-
-# Permanently write kernel + rootfs to NOR flash:
-./spflash.py flash
+./spflash.py netboot                 # boot the built image from RAM; writes nothing
+./spflash.py install                 # persistent install (below)
+./spflash.py backup  --host <ip>     # dump the whole 16 MiB NOR, verified
+./spflash.py restore --host <ip>     # back to stock Control4
 ```
 
-It auto-detects the serial port (or pass `--port /dev/tty...`; use
-`--list-ports` to see candidates) and prompts you to power-cycle the unit so it
-can catch RedBoot's interrupt window automatically. YMODEM over 57600 baud is
-slow (~10 KiB/s), so a full flash of the rootfs takes a while — a progress bar
-shows the transfer.
+YMODEM at 57600 baud runs at about 3 KiB/s, so a netboot takes ~25 minutes.
 
-`netboot` uses `rootfs.cpio.gz` (RAM initramfs); `flash` uses
-`rootfs.squashfs` (mounted from flash). After `flash`, the tool prints the
-one remaining manual step: setting RedBoot's boot script via `fconfig` (left
-manual by design, since a bad boot script written blind can break auto-boot).
+### Flash layout
+
+The NOR is 16 MiB (128 x 128 KiB). Stock's RedBoot, kernel (`zImage`), rootfs
+(`cramfs`) and FIS directory are never written - the kernel maps them
+read-only. Stock's 9 MiB `jffs2.img` (Control4's `/etc`, packages and modules)
+and the 256 KiB after it become:
+
+| Partition | Size | Holds |
+|---|---|---|
+| `osp-kernel` | 2 MiB | the kernel |
+| `osp-rootfs` | 4.375 MiB | squashfs root (`/dev/mtdblock5`) |
+| `osp-restore` | 2.125 MiB | stock's jffs2 files (xz) and its RedBoot config block |
+| `osp-data` | 768 KiB | jffs2 for settings and SSH host keys (`/data`) |
+
+RedBoot's FIS directory stays stock: the boot script becomes
+`fis load jffs2.img` plus an `exec` of the kernel at the start of that region.
+
+### What `install` does
+
+1. Netboots the image, then backs up the whole NOR to `backups/<hostname>/`
+   (checked against the box's own md5; never committed).
+2. Packs this unit's stock jffs2 files into `osp-restore` (read through a
+   read-only jffs2 mount, compressed on the host), before anything else is
+   written - so the way back exists first.
+3. Writes the kernel and rootfs (each read back and verified) and formats
+   `/data`.
+4. Test-boots from flash by typing the boot commands at the RedBoot prompt,
+   and only then saves them as RedBoot's boot script.
+
+### Return to stock
+
+From the web UI (Settings -> Return to stock), MQTT (`cmd/system/restore`
+`confirm`), `spflash.py restore`, or `osp-restore stock --yes` on the box. It
+re-creates stock's jffs2 from `osp-restore` (only zlib/rtime nodes, which
+stock's 2.4 kernel reads), checks every file's md5, blanks the unallocated
+space, writes stock's RedBoot config block back - which restores the stock
+boot script - and reboots into Control4. All of this runs from RAM.
+
+With a USB stick holding the raw `jffs2.bin` and `redboot-config.bin` from a
+backup (and their `MD5SUMS`), `osp-restore stock --yes --raw /media/usb/<dir>`
+writes them back bit for bit instead.
 
 ## Disclaimer
 

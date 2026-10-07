@@ -21,8 +21,18 @@ void player_tick(void);
 /* JSON now-playing: { source, state, file, title, artist, album, elapsed, duration, hasArt } */
 void player_now_json(char *out, size_t out_len);
 
+/* The same shape for whatever is actually feeding the output: an AirPlay
+ * session, the line-in loopback, or USB media. What GET /api/now and MQTT's
+ * state/now both report. */
+void now_playing_json(char *out, size_t out_len);
+
 /* JSON library: { usb, updating, tracks:[...] } (rescans /media/usb, cached). */
 void player_library_json(char *out, size_t out_len);
+
+/* The library's state without its contents: { usb, updating, rev }, where rev
+ * is MPD's db_update time. Cheap enough to check every second; a client
+ * re-fetches GET /api/library only when it changes. */
+void player_library_state_json(char *out, size_t out_len);
 
 int player_transport(const char *cmd); /* play|pause|stop|next|prev */
 int player_release(void);              /* stop + close the ALSA device so another source can use it */

@@ -1,0 +1,191 @@
+#!/bin/sh
+# osp-restore - put this SpeakerPoint back to stock Control4, from its own flash.
+#
+#   osp-restore status [--verify]       what the payload holds (--verify: md5 every byte)
+#   osp-restore stock --yes             return to stock (one-way; the box reboots)
+#   osp-restore stock --yes --raw DIR   same, from a raw backup (e.g. a USB stick)
+#                                       holding jffs2.bin + redboot-config.bin
+#                                       and their MD5SUMS - bit-exact
+#
+# What stock is made of, and what openSpeakerPoint changed (see the board .dts):
+# stock's RedBoot, kernel, cramfs and FIS directory were never written. Its 9 MiB
+# jffs2.img region (Control4's /etc, packages and modules) and the 256 KiB after
+# it now hold openSpeakerPoint, and RedBoot's boot script loads us instead of
+# stock's kernel. Undoing that is three writes, in this order:
+#
+#   1. re-create stock's jffs2 in its region and unpack stock's files into it
+#      (from osp-restore's payload), then check every file's md5;
+#   2. erase the unallocated 256 KiB (all 0xFF on a stock unit);
+#   3. write stock's RedBoot config block back - its boot script is
+#      `fis load zImage; exec`, i.e. stock - and read it back.
+#
+# Step 1 erases the flash this system runs from, so everything after the payload
+# is read runs from RAM: busybox, the flash tools and the musl loader are copied
+# to /tmp first, every other process is stopped, and the last act is a hardware
+# reset. The jffs2 is written with only zlib/rtime nodes (see linux.fragment),
+# which is what stock's 2.4.21 kernel reads.
+
+set -u
+W=/tmp/osp-restore
+LOG=/tmp/osp-restore.log
+STOCK_JFFS2_OFF=0x680000
+STOCK_JFFS2_LEN=0x900000
+UNALLOC_OFF=0xf80000
+UNALLOC_BLOCKS=2
+
+say() { echo "osp-restore: $*"; logger -t osp-restore "$*" 2>/dev/null || true; }
+die() { say "ERROR: $*"; exit 1; }
+
+# mtd device (e.g. mtd6) for a partition label, from /proc/mtd.
+mtd_of() { sed -n "s/^\(mtd[0-9]*\): .* \"$1\"\$/\1/p" /proc/mtd | head -n 1; }
+
+payload_dev() {
+	p=$(mtd_of osp-restore)
+	[ -n "$p" ] || die "no osp-restore partition (is this an installed openSpeakerPoint?)"
+	echo "/dev/$p"
+}
+
+do_status() {
+	dev=$(payload_dev)
+	if ! tar -x -O -f "$dev" MANIFEST 2>/dev/null; then
+		echo "state: none (no stock payload on this box)"
+		return 1
+	fi
+	if [ "${1:-}" = --verify ]; then
+		rm -rf "$W" && mkdir -p "$W"
+		if tar -x -f "$dev" -C "$W" 2>/dev/null && (cd "$W" && md5sum -c -s PAYLOAD.md5); then
+			echo "state: ready (payload verified)"
+		else
+			echo "state: damaged (restore from a raw backup with --raw)"
+			rm -rf "$W"
+			return 1
+		fi
+		rm -rf "$W"
+	else
+		echo "state: ready"
+	fi
+}
+
+# Copy a binary and everything it links against into $W, keeping the loader.
+stage() {
+	bin=$(command -v "$1") || die "$1 missing"
+	cp "$bin" "$W/bin/$1"
+	/lib/ld-musl-arm.so.1 --list "$bin" 2>/dev/null | sed -n 's/.*=> \([^ ]*\).*/\1/p' |
+		while read -r lib; do cp -n "$lib" "$W/lib/" 2>/dev/null; done
+}
+
+do_stock() {
+	raw=""
+	yes=no
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--yes) yes=yes ;;
+			--raw) shift; raw="${1:-}" ;;
+		esac
+		shift
+	done
+	[ "$yes" = yes ] || die "returning to stock wipes openSpeakerPoint; pass --yes"
+
+	cfg=$(mtd_of RedBoot-config)
+	[ -n "$cfg" ] || die "no RedBoot-config partition"
+	[ -e /dev/mtd0 ] || die "no whole-chip /dev/mtd0"
+
+	rm -rf "$W" && mkdir -p "$W/bin" "$W/lib" "$W/data"
+
+	# --- the stock images, into RAM, verified --------------------------------
+	if [ -n "$raw" ]; then
+		[ -f "$raw/jffs2.bin" ] && [ -f "$raw/redboot-config.bin" ] && [ -f "$raw/MD5SUMS" ] ||
+			die "$raw needs jffs2.bin, redboot-config.bin and MD5SUMS"
+		(cd "$raw" && grep -e " jffs2.bin" -e " redboot-config.bin" MD5SUMS | md5sum -c -s) ||
+			die "raw backup in $raw fails its MD5SUMS"
+		# The 9 MiB image stays on the stick (RAM is 32 MiB); only the config
+		# block is copied. The stick is read from RAM-resident tools below.
+		cp "$raw/redboot-config.bin" "$W/data/redboot-config.bin"
+		mode=raw
+	else
+		tar -x -f "$(payload_dev)" -C "$W/data" || die "cannot read the payload"
+		(cd "$W/data" && md5sum -c -s PAYLOAD.md5) || die "payload is damaged; use --raw with a backup"
+		mode=payload
+	fi
+	head -c 4096 "$W/data/redboot-config.bin" > "$W/data/cfg4k.bin"
+	cfgsum=$(md5sum < "$W/data/cfg4k.bin" | cut -d' ' -f1)
+
+	# --- tools into RAM ---------------------------------------------------------
+	cp /lib/ld-musl-arm.so.1 "$W/lib/"
+	for t in busybox flash_erase mtdpart; do stage "$t"; done
+
+	cat > "$W/run" <<EOF
+#!/bin/sh
+# RAM phase. Nothing below may touch the flash rootfs.
+LD=$W/lib/ld-musl-arm.so.1
+L="\$LD --library-path $W/lib"
+bb() { \$L $W/bin/busybox "\$@"; }
+say() { echo "osp-restore: \$*" | bb tee -a $LOG > /dev/console; }
+fail() { say "FAILED: \$* - the box is NOT stock; recover over serial (spflash.py)"; exit 1; }
+mtd_of() { bb sed -n "s/^\(mtd[0-9]*\): .* \"\$1\"\\\$/\1/p" /proc/mtd | bb head -n 1; }
+trap '' HUP INT TERM
+
+say "stopping services"
+for p in /proc/[0-9]*; do
+	pid=\${p#/proc/}
+	[ "\$pid" = 1 ] || [ "\$pid" = \$\$ ] || bb kill -9 "\$pid" 2>/dev/null
+done
+bb sync
+# /data is on flash about to be erased; a USB stick (--raw) stays mounted.
+bb umount /data 2>/dev/null
+
+# 1. stock's jffs2 region
+\$L $W/bin/mtdpart add /dev/mtd0 stock-jffs2 $STOCK_JFFS2_OFF $STOCK_JFFS2_LEN || fail "mtdpart add"
+J=\$(mtd_of stock-jffs2); [ -n "\$J" ] || fail "no stock-jffs2 mtd"
+EOF
+	if [ "$mode" = raw ]; then
+		cat >> "$W/run" <<EOF
+say "erasing stock's jffs2 region"
+\$L $W/bin/flash_erase -q /dev/\$J 0 0 || fail "erase"
+say "writing the raw stock jffs2 image from $raw"
+bb dd if="$raw/jffs2.bin" of=/dev/\$J bs=131072 2>/dev/null || fail "write jffs2.bin"
+want=\$(bb grep " jffs2.bin" "$raw/MD5SUMS" | bb cut -d' ' -f1)
+got=\$(bb dd if=/dev/\$J bs=131072 count=72 2>/dev/null | bb md5sum | bb cut -d' ' -f1)
+[ "\$got" = "\$want" ] || fail "jffs2 region reads back \$got, expected \$want"
+EOF
+	else
+		cat >> "$W/run" <<EOF
+say "re-creating stock's jffs2"
+\$L $W/bin/flash_erase -q -j /dev/\$J 0 0 || fail "erase"
+bb mkdir -p /tmp/stock
+bb mount -t jffs2 /dev/mtdblock\${J#mtd} /tmp/stock || fail "mount the new jffs2"
+say "unpacking stock's files"
+bb tar -xJ -f $W/data/stock-jffs2.tar.xz -C /tmp/stock || fail "unpack"
+bb sync
+(cd /tmp/stock && bb md5sum -c -s $W/data/stock-jffs2.md5) || fail "stock files do not match their md5s"
+bb umount /tmp/stock || fail "umount"
+EOF
+	fi
+	cat >> "$W/run" <<EOF
+
+# 2. the unallocated space stock leaves blank
+\$L $W/bin/flash_erase -q /dev/mtd0 $UNALLOC_OFF $UNALLOC_BLOCKS || fail "erase unallocated"
+
+# 3. stock's RedBoot config: its boot script boots stock again
+say "writing stock's RedBoot config"
+\$L $W/bin/flash_erase -q /dev/$cfg 0 1 || fail "erase RedBoot config"
+bb dd if=$W/data/cfg4k.bin of=/dev/$cfg bs=4096 count=1 2>/dev/null || fail "write RedBoot config"
+got=\$(bb dd if=/dev/$cfg bs=4096 count=1 2>/dev/null | bb md5sum | bb cut -d' ' -f1)
+[ "\$got" = "$cfgsum" ] || fail "RedBoot config reads back \$got, expected $cfgsum"
+
+say "stock restored and verified - rebooting into Control4"
+bb sync
+bb devmem 0x80940000 32 0xaaaa
+EOF
+	chmod +x "$W/run"
+	say "payload verified ($mode); handing over to the RAM phase - the box will reboot into stock"
+	# setsid: the caller (ssh, the control daemon) is about to be stopped.
+	exec setsid "$W/lib/ld-musl-arm.so.1" --library-path "$W/lib" "$W/bin/busybox" sh "$W/run" \
+		>> "$LOG" 2>&1 < /dev/null
+}
+
+case "${1:-}" in
+	status) shift; do_status "$@" ;;
+	stock)  shift; do_stock "$@" ;;
+	*) echo "usage: $0 {status [--verify]|stock --yes [--raw DIR]}" >&2; exit 2 ;;
+esac

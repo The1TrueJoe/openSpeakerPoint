@@ -14,6 +14,10 @@
 #   speakerpoint-audio-apply status          machine-readable hardware state
 #   speakerpoint-audio-apply tone <ch>       pink noise (left|right|both)
 #   speakerpoint-audio-apply tone-stop
+#   speakerpoint-audio-apply capture         free + set up the line input for a
+#                                            measurement (stops the loopback,
+#                                            Line at 0 dB gain); the next
+#                                            `apply` puts the routing back
 #
 # Signal paths:
 #   RCA out : PCM -> STAC9758 analog DACs -> Master/Front -> RCA jacks
@@ -49,6 +53,23 @@ amix() {
 	return 0
 }
 
+# Every mixer write for one apply goes through ONE amixer process: each amixer
+# run re-parses ALSA's config, about half a second on this 200 MHz ARM9, and an
+# apply used to make ~20 of them (7.5 s per volume change). `amixer -s` reads
+# the commands from stdin; missing controls are ignored there, and a real
+# failure stops the batch with a non-zero exit, which is reported.
+MIXQ=""
+mix() { MIXQ="$MIXQ$*
+"; }
+mix_flush() {
+	[ -n "$MIXQ" ] || return 0
+	if ! out=$(printf '%s' "$MIXQ" | amixer -c "$CARD" -q -s 2>&1); then
+		warn "amixer batch: ${out%%
+*}"
+	fi
+	MIXQ=""
+}
+
 # --- D2-41051 amp over I2C: 24-bit register address + 24-bit data, MSB first
 d2_write() { # d2_write AAAAAA DDDDDD
 	[ -c "/dev/i2c-${I2C_BUS}" ] || { warn "no /dev/i2c-${I2C_BUS}"; return 1; }
@@ -73,47 +94,54 @@ d2_read() { # d2_read AAAAAA -> "0xXX 0xXX 0xXX"
 		"r3" 2>/dev/null
 }
 
-# 0-100 -> D2 signed-24-bit master volume. 100 = 0x800000 (0dB), 0 = full cut.
+# 0-100 -> "<D2 hex> <attenuation dB>", one table for both volume stages.
 #
-# Precomputed table rather than floating-point math at runtime: this ran
-# through awk before, and when that produced nothing the fallback silently
-# wrote "full volume" for EVERY setting - so volume and mute did nothing at
-# all while the readback looked plausible. A table has no dependencies and
-# no failure mode. Values are -2^23 * 10^(-atten/20) with atten=(100-v)*0.5,
-# i.e. 0 -> -50dB, 100 -> 0dB, rounded to the nearest 5% step.
-d2_vol_hex() {
+# Audio taper: atten = 40*log10(100/v) dB (60 -> -8.9dB, 50 -> -12dB, 10 ->
+# -40dB), the usual square-law volume curve. The old curve was linear in dB
+# (0.5dB per step), so 60% was already -20dB - "very very quiet" on the amp.
+# D2 value = -2^23 * 10^(-atten/20) as signed 24-bit; 100 = 0x800000 (0dB),
+# 0 = full cut. A precomputed table rather than runtime math: this ran through
+# awk once, and when that produced nothing the fallback silently wrote "full
+# volume" for every setting. Rounded to the nearest 5% step.
+d2_vol_table() {
 	v="$1"
 	[ "$v" -ge 0 ] 2>/dev/null || v=0      # non-numeric/negative -> 0
 	[ "$v" -le 100 ] 2>/dev/null || v=100
 	v=$(( (v + 2) / 5 * 5 ))   # nearest 5% step
 	case "$v" in
-	0)   echo 000000 ;;
-	5)   echo ff75d2 ;;
-	10)  echo ff47bb ;;
-	15)  echo ff0a46 ;;
-	20)  echo feb852 ;;
-	25)  echo fe4b08 ;;
-	30)  echo fdb94b ;;
-	35)  echo fcf6f3 ;;
-	40)  echo fbf3c9 ;;
-	45)  echo fa9a2f ;;
-	50)  echo f8cd52 ;;
-	55)  echo f666bf ;;
-	60)  echo f33333 ;;
-	65)  echo eeee51 ;;
-	70)  echo e93cef ;;
-	75)  echo e1a57c ;;
-	80)  echo d785d9 ;;
-	85)  echo ca05d9 ;;
-	90)  echo b80533 ;;
-	95)  echo a00377 ;;
-	*)   echo 800000 ;;
+	0)   echo "000000 -100" ;;
+	5)   echo "ffae14 -52.0" ;;
+	10)  echo "feb852 -40.0" ;;
+	15)  echo "fd1eb8 -33.0" ;;
+	20)  echo "fae148 -28.0" ;;
+	25)  echo "f80000 -24.1" ;;
+	30)  echo "f47ae1 -20.9" ;;
+	35)  echo "f051ec -18.2" ;;
+	40)  echo "eb851f -15.9" ;;
+	45)  echo "e6147b -13.9" ;;
+	50)  echo "e00000 -12.0" ;;
+	55)  echo "d947ae -10.4" ;;
+	60)  echo "d1eb85 -8.9" ;;
+	65)  echo "c9eb85 -7.5" ;;
+	70)  echo "c147ae -6.2" ;;
+	75)  echo "b80000 -5.0" ;;
+	80)  echo "ae147b -3.9" ;;
+	85)  echo "a3851f -2.8" ;;
+	90)  echo "9851ec -1.8" ;;
+	95)  echo "8c7ae1 -0.9" ;;
+	*)   echo "800000 0.0" ;;
 	esac
 }
+d2_vol_hex() { set -- $(d2_vol_table "$1"); echo "$1"; }
+vol_db()     { set -- $(d2_vol_table "$1"); echo "$2"; }
 
 # --- the one declarative entry point ---------------------------------------
 do_apply() {
 	output="$1"; source="$2"; volume="$3"
+	# speakerpoint-control passes the exact amp word and codec dB for the
+	# volume (its curve, at 1% steps); by hand, the 5% table below stands in.
+	d2hex="${4:-}"; db="${5:-}"
+	[ -n "$db" ] || db=$(vol_db "$volume")
 
 	case "$output" in off|rca|amp|both) ;; *) warn "bad output '$output'"; return 1 ;; esac
 	case "$source" in media|linein) ;;    *) warn "bad source '$source'"; return 1 ;; esac
@@ -131,9 +159,9 @@ do_apply() {
 	# S/PDIF transmitter both read it), so it stays fully up whenever any
 	# output is active and only the per-path stages below do the muting.
 	if [ "$output" = "off" ]; then
-		amix sset PCM 0% mute
+		mix sset PCM 0% mute
 	else
-		amix sset PCM 100% unmute
+		mix sset PCM 100% unmute
 	fi
 
 	# Silence every mixer path this board doesn't use. The STAC9758 is a
@@ -142,40 +170,77 @@ do_apply() {
 	# happened to be in, they add audible hiss/crosstalk. "Declarative" has
 	# to mean ALL the state, not just the parts we actively set, or noise
 	# leaks back in from whatever touched the mixer last.
-	for c in Surround Center LFE "Master Mono" "Surround Mix"; do
-		amix sset "$c" 0% mute 2>/dev/null
-	done
-	for c in CD Aux Phone Mic "PC Speaker" "Video"; do
-		amix sset "$c" 0% mute 2>/dev/null
+	for c in Surround Center LFE "'Master Mono'" "'Surround Mix'" CD Aux Phone Mic "'PC Speaker'" Video; do
+		mix sset "$c" 0% mute
 	done
 	# Line-in is only unmuted into the mix when it's the selected source.
-	if [ "$source" != linein ]; then
-		amix sset Line 0% mute 2>/dev/null
-	fi
+	# Line's analog mixer path stays muted in every mode, line-in included:
+	# line-in reaches the outputs only through the capture -> alsaloop -> PCM
+	# loop, where the volume and the S/PDIF amp apply. Unmuting it as well
+	# (as line-in mode once did) added an analog copy to the RCA output 50ms
+	# ahead of the looped one - an echo/comb filter.
+	mix sset Line 0% mute
 
-	# --- analog path (RCA) ---
+	# --- analog stage: Master/Front ---
+	# The STAC9758's S/PDIF transmitter takes its data AFTER the Master/Front
+	# attenuators (though before their mute switches) - measured: the amp got
+	# louder with Master raised while Master stayed muted, and a box that
+	# booted straight into "amp" (Master never set, so at the codec's 0% reset
+	# attenuation) played nothing at all. So:
+	#   amp  : Master/Front at 0 dB but muted (RCA silent), volume on the D2;
+	#   rca  : Master/Front at the volume, S/PDIF off;
+	#   both : Master/Front at the volume - which sets the S/PDIF level too -
+	#          and the D2 at 0 dB, so speakers and RCA follow one volume
+	#          instead of attenuating twice.
 	if [ "$analog" = yes ]; then
-		amix sset Master "${volume}%" unmute
-		amix sset Front  "${volume}%" unmute
+		# Same taper as the amp, in dB (the codec clamps to its -46.5dB floor).
+		if [ "$volume" -eq 0 ]; then
+			mix sset Master 0% mute
+			mix sset Front  0% mute
+		else
+			mix sset Master "${db}dB" unmute
+			mix sset Front  "${db}dB" unmute
+		fi
+		d2_volume=100
 	else
-		amix sset Master mute
-		amix sset Front  mute
+		mix sset Master 100% mute
+		mix sset Front  100% mute
+		d2_volume="$volume"
 	fi
 
 	# --- digital path (S/PDIF -> D2 amp) ---
 	if [ "$digital" = yes ]; then
 		# SPSA=0 points the transmitter at slots 3&4, where the PCM audio
 		# actually is. Without this it reads empty slots and sends silence.
-		amix cset name="$SPDIF_SPSA" 0
-		amix cset name="$SPDIF_SW" on
-		d2_write "020001" "c00001"                 # amp input = S/PDIF
-		d2_write "000000" "$(d2_vol_hex "$volume")" # amp master volume
+		mix cset "'name=$SPDIF_SPSA'" 0
+		mix cset "'name=$SPDIF_SW'" on
 	else
-		amix cset name="$SPDIF_SW" off
+		mix cset "'name=$SPDIF_SW'" off
+	fi
+
+	# --- capture path (line-in loopback): mixer side ---
+	if [ "$source" = linein ]; then
+		# Record gain 0dB. Measured from the HC-800's line out: a -6dBFS
+		# tone arrives at -10dBFS RMS / -7dBFS peak with 0.01% THD, so a
+		# full-scale source peaks just under 0dBFS. The old 80% (+18dB)
+		# clipped ordinary music into a square wave.
+		mix sset Capture 0% cap
+		mix cset "'name=Capture Source'" Line
+	fi
+	mix_flush
+
+	# --- the D2 amp: its own registers, over I2C ---
+	if [ "$digital" = yes ]; then
+		d2_write "020001" "c00001"                 # amp input = S/PDIF
+		if [ "$d2_volume" = 100 ] || [ -z "$d2hex" ]; then
+			d2hex=$(d2_vol_hex "$d2_volume")
+		fi
+		d2_write "000000" "$d2hex"                 # amp master volume
+	else
 		d2_write "000000" "000000"                 # amp hard mute
 	fi
 
-	# --- capture path (line-in loopback) ---
+	# --- the loopback process, once the mixer is set ---
 	if [ "$source" = linein ]; then
 		linein_start
 	else
@@ -204,13 +269,24 @@ linein_start() {
 		return 0
 	fi
 	linein_stop
-	amix sset "Line" 80% unmute
-	amix sset Capture 80% cap
-	amix cset name="Capture Source" Line
 	(
 		alsaloop -C sp_capture -P default -t 50000 >/dev/null 2>&1 &
 		echo "$!" > "$LINEIN_PIDFILE"
 	) &
+}
+
+# --- line-in measurement ---------------------------------------------------
+# speakerpoint-control's measure_linein() records the line input itself; this
+# only gets the capture side ready. The loopback owns the capture device while
+# it runs, so it stops here, and the gain is pinned at 0 dB (the loopback uses
+# +18 dB) so a level reads the same from one measurement to the next. The
+# daemon re-runs `apply` afterwards, which restarts the loopback if line-in is
+# the selected source.
+do_capture() {
+	linein_stop
+	mix cset "'name=Capture Source'" Line
+	mix sset Capture 0% cap
+	mix_flush
 }
 
 # --- test tones -------------------------------------------------------------
@@ -276,12 +352,13 @@ do_status() {
 }
 
 case "${1:-}" in
-	apply)     do_apply "${2:-off}" "${3:-media}" "${4:-0}" ;;
+	apply)     do_apply "${2:-off}" "${3:-media}" "${4:-0}" "${5:-}" "${6:-}" ;;
 	status)    do_status ;;
 	tone)      tone_play "${2:-both}" ;;
 	tone-stop) tone_stop ;;
+	capture)   do_capture ;;
 	*)
-		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100>|status|tone <ch>|tone-stop}" >&2
+		echo "usage: $0 {apply <off|rca|amp|both> <media|linein> <0-100> [<d2hex> <dB>]|status|tone <ch>|tone-stop|capture}" >&2
 		exit 1
 		;;
 esac

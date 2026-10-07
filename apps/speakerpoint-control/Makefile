@@ -1,4 +1,4 @@
-# speakerpoint-control - HTTP control daemon for the SpeakerPoint.
+# speakerpoint-control - HTTP + MQTT control daemon for the SpeakerPoint.
 #
 # Buildroot invokes this Makefile's `make` with CFLAGS set as a command-line
 # variable (via TARGET_CONFIGURE_OPTS), which always takes priority over a
@@ -14,8 +14,11 @@ LDFLAGS ?=
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
 
+# libmosquitto for MQTT, libm for the line-in measurement.
+LDLIBS  := -lmosquitto -lm
+
 speakerpoint-control: $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS) $(LDLIBS)
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<

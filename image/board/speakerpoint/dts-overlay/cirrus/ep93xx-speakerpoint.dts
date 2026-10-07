@@ -115,14 +115,18 @@
 };
 
 &ebi {
+	/*
+	 * 16 MiB Intel JS28F128 NOR. The partition layout is NOT described
+	 * here: it is mtdparts= on the kernel's built-in command line
+	 * (linux.fragment), against this device's name, 60000000.flash. Growing this
+	 * device tree by a fixed-partitions node (8.4 -> 9.1 KiB) made every
+	 * kernel - even one without a flash driver - hang silently at the
+	 * RedBoot handoff, so the DT is kept to the size that boots.
+	 */
 	flash@60000000 {
 		compatible = "cfi-flash";
 		reg = <0x60000000 0x1000000>;
 		bank-width = <2>;
-		partitions {
-			compatible = "redboot-fis";
-			fis-index-block = <127>;
-		};
 	};
 };
 
