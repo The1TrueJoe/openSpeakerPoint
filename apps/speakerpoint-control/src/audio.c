@@ -54,6 +54,14 @@ static const unsigned TONE_GAIN[2 * TONE_STEPS + 1] = {
 #define D2_TREBLE_R 0x000011
 #define D2_LOUD_L 0x0000DB
 #define D2_LOUD_R 0x0000DE
+/* Per-channel volume (spserver's balance: leftVolumeIndex/rightVolumeIndex),
+ * after the master volume at 0x000000. They power up at 0xff4dd2, about
+ * -45 dB, and stock always set them - left alone, every other stage at full
+ * still leaves the speaker far too quiet. Unity (0x800000, the same negated
+ * Q1.23 word as the master) on both: the master is the volume. */
+#define D2_CHAN_L 0x000001
+#define D2_CHAN_R 0x000002
+#define D2_UNITY 0x800000
 
 static int s_bass, s_treble;      /* -14..14 */
 static bool s_loudness;
@@ -196,6 +204,8 @@ static void run_apply(const char *fmt, ...)
 static void apply_all(void)
 {
     run_apply("apply %s %s %d %06x %.1f", s_output, s_source, s_volume, d2_word(s_volume), vol_db(s_volume));
+    if (d2_write(D2_CHAN_L, D2_UNITY) < 0 || d2_write(D2_CHAN_R, D2_UNITY) < 0)
+        fprintf(stderr, "speakerpoint-control: D2 channel volume write failed\n");
     tone_hw();
 }
 
