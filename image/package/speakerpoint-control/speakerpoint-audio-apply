@@ -232,6 +232,10 @@ do_apply() {
 	# --- the D2 amp: its own registers, over I2C ---
 	if [ "$digital" = yes ]; then
 		d2_write "020001" "c00001"                 # amp input = S/PDIF
+		# Per-channel volumes (stock's balance) to unity: they power up at
+		# about -45dB, which made the speaker far too quiet at full volume.
+		d2_write "000001" "800000"
+		d2_write "000002" "800000"
 		if [ "$d2_volume" = 100 ] || [ -z "$d2hex" ]; then
 			d2hex=$(d2_vol_hex "$d2_volume")
 		fi
