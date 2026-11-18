@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<devicedata>
+  <copyright>Copyright 2026 Joseph Telaak</copyright>
+  <creator>Joseph Telaak</creator>
+  <name>SpeakerPoint (Open)</name>
+  <manufacturer>Open Source</manufacturer>
+  <model>openspeakerpoint</model>
+  <created>2026-11-17</created>
+  <modified>2026-11-17</modified>
+  <version>1</version>
+  <control>lua_gen</control>
+  <controlmethod>ip</controlmethod>
+  <driver>DriverWorks</driver>
+
+  <composer_categories>
+    <category>Audio/Video</category>
+  </composer_categories>
+
+  <!-- An audio endpoint/amp. Control4 selects a source into it and sets volume; the
+       box itself carries the audio (line-in from the EA3 ADC, or its own USB/AirPlay
+       media). The driver controls it over the box's MQTT API, not a native C4 stream -
+       so no DIGITAL_AUDIO_CLIENT connection here (that is the native-streaming stretch). -->
+  <capabilities>
+    <can_switch>True</can_switch>
+    <has_discrete_volume_control>True</has_discrete_volume_control>
+    <has_up_down_volume_control>True</has_up_down_volume_control>
+    <has_discrete_mute_control>True</has_discrete_mute_control>
+    <has_toggle_mute_control>True</has_toggle_mute_control>
+    <has_discrete_input_select>True</has_discrete_input_select>
+    <audio_consumer_count>2</audio_consumer_count>
+    <audio_provider_count>1</audio_provider_count>
+    <video_consumer_count>0</video_consumer_count>
+    <video_provider_count>0</video_provider_count>
+  </capabilities>
+
+  <proxies>
+    <proxy proxybindingid="5001" primary="True" name="SpeakerPoint">avswitch</proxy>
+  </proxies>
+
+  <connections>
+    <connection><id>5001</id><facing>6</facing><connectionname>SpeakerPoint</connectionname>
+      <type>2</type><consumer>False</consumer><audiosource>False</audiosource>
+      <videosource>False</videosource><linelevel>False</linelevel>
+      <classes><class><classname>AVSWITCH</classname></class></classes><hidden>True</hidden></connection>
+
+    <!-- The box's mosquitto broker. Set the box IP on Composer's Network tab; the driver
+         speaks MQTT 3.1.1 (QoS 0) over this TCP socket. No line delimiter: MQTT is binary. -->
+    <connection><id>6001</id><facing>6</facing><connectionname>MQTT (box)</connectionname>
+      <type>4</type><consumer>True</consumer><audiosource>False</audiosource>
+      <videosource>False</videosource><linelevel>True</linelevel>
+      <classes><class><classname>TCP</classname><ports><port>
+        <name>MQTT</name><number>1883</number><auto_connect>True</auto_connect>
+        <monitor_connection>True</monitor_connection><keep_connection>True</keep_connection>
+        <keep_alive>True</keep_alive>
+      </port></ports></class></classes></connection>
+
+    <!-- Audio inputs the switch can select. Bind the EA3 ADC / line-level source to
+         "Line In"; "On-Board Media" is the box's own USB/AirPlay player. SET_INPUT one
+         of these -> cmd/audio/source. -->
+    <connection proxybindingid="5001"><id>100</id><facing>6</facing><connectionname>Line In</connectionname>
+      <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes><class><classname>STEREO</classname></class><class><classname>RCA_IN</classname></class></classes></connection>
+    <connection proxybindingid="5001"><id>101</id><facing>6</facing><connectionname>On-Board Media</connectionname>
+      <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes><class><classname>STEREO</classname></class></classes></connection>
+
+    <!-- The speaker output (the box's amp/RCA). Bind the room's speakers here. -->
+    <connection proxybindingid="5001"><id>4000</id><facing>6</facing><connectionname>Speaker Output</connectionname>
+      <type>6</type><consumer>False</consumer><audiosource>True</audiosource><videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes><class><classname>STEREO</classname></class><class><classname>SPEAKER</classname></class></classes></connection>
+
+    <!-- Bind a room here to make this the room's audio endpoint (volume follows). -->
+    <connection proxybindingid="5001"><id>7000</id><facing>6</facing><connectionname>Room</connectionname>
+      <type>7</type><consumer>False</consumer><audiosource>True</audiosource><videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes><class><classname>AUDIO_SELECTION</classname></class><class><classname>AUDIO_VOLUME</classname></class></classes></connection>
+  </connections>
+
+  <config>
+    <script file="driver.lua"/>
+    <properties>
+      <property><name>Status</name><type>STRING</type><readonly>true</readonly><default>not bound</default></property>
+      <property><name>Now Playing</name><type>STRING</type><readonly>true</readonly><default></default></property>
+      <property><name>Source</name><type>STRING</type><readonly>true</readonly><default></default></property>
+      <property><name>Volume</name><type>STRING</type><readonly>true</readonly><default></default></property>
+      <property><name>Last Command</name><type>STRING</type><readonly>true</readonly><default></default></property>
+      <property><name>Output</name><type>LIST</type><items><item>off</item><item>rca</item><item>amp</item><item>both</item></items><default>amp</default></property>
+      <property><name>Bass</name><type>RANGED_INTEGER</type><minimum>-14</minimum><maximum>14</maximum><default>0</default></property>
+      <property><name>Treble</name><type>RANGED_INTEGER</type><minimum>-14</minimum><maximum>14</maximum><default>0</default></property>
+      <property><name>Loudness</name><type>LIST</type><items><item>Off</item><item>On</item></items><default>Off</default></property>
+      <property><name>Debug</name><type>LIST</type><items><item>Off</item><item>On</item></items><default>On</default></property>
+    </properties>
+  </config>
+
+  <!-- Programming actions (Composer "Actions" tab) and commands (usable in Director
+       programming). Transport + library + the return-to-stock, which avswitch has no
+       native command for. -->
+  <actions>
+    <action name="Play"><command>Play</command></action>
+    <action name="Pause"><command>Pause</command></action>
+    <action name="Stop"><command>Stop</command></action>
+    <action name="Next"><command>Next</command></action>
+    <action name="Previous"><command>Previous</command></action>
+    <action name="Rescan Library"><command>RescanLibrary</command></action>
+    <action name="Return to Stock (erases openSpeakerPoint)"><command>ReturnToStock</command></action>
+  </actions>
+
+  <commands>
+    <command><name>Play</name></command>
+    <command><name>Pause</name></command>
+    <command><name>Stop</name></command>
+    <command><name>Next</name></command>
+    <command><name>Previous</name></command>
+    <command><name>RescanLibrary</name></command>
+    <command><name>ReturnToStock</name></command>
+    <command><name>SetOutput</name>
+      <params><param><name>Output</name><type>LIST</type><items><item>off</item><item>rca</item><item>amp</item><item>both</item></items></param></params>
+    </command>
+    <command><name>SetSource</name>
+      <params><param><name>Source</name><type>LIST</type><items><item>media</item><item>linein</item></items></param></params>
+    </command>
+  </commands>
+</devicedata>
