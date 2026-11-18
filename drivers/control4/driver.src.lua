@@ -5,8 +5,10 @@
 -- USB/AirPlay media). This driver controls the box over its MQTT API and mirrors the
 -- box's retained state back to the proxy and to the Properties.
 --
--- DriverWorks has no MQTT client, so we frame MQTT 3.1.1 (QoS 0) ourselves over the
--- TCP binding (6001 -> the box's mosquitto on :1883, anonymous). Self-check: test.lua.
+-- DriverWorks has no MQTT client. The MQTT 3.1.1 (QoS 0) framing is the shared
+-- control4-lua-mqtt lib (the global C4MQTT), concatenated ahead of this body by
+-- package.sh; here we own only the transport (the 6001 TCP binding -> the box's
+-- mosquitto on :1883, anonymous) and the box's topic contract. Self-check: test.lua.
 
 local NET, PORT, PROXY = 6001, 1883, 5001
 local INPUT_LINEIN, INPUT_MEDIA = 100, 101
@@ -16,42 +18,12 @@ local KEEPALIVE = 30
 local base           -- "openspeakerpoint/<hostname>", learned from the first message
 local buffer = ""
 local connected = false
-local subPid = 0
 local volume, muted, premuteVol = 0, false, 0
 
 local function prop(name, value) C4:UpdateProperty(name, tostring(value)) end
 local function dbg(msg) if Properties["Debug"] == "On" then print("[speakerpoint] " .. msg) end end
 
------------------------------------------------------------------------ MQTT framing
-local function encodeLen(n)
-  local s = ""
-  repeat
-    local b = n % 128
-    n = math.floor(n / 128)
-    if n > 0 then b = b + 128 end
-    s = s .. string.char(b)
-  until n == 0
-  return s
-end
-
-local function u16(n) return string.char(math.floor(n / 256) % 256, n % 256) end
-local function mqttStr(s) return u16(#s) .. s end
-local function packet(typeFlags, payload) return string.char(typeFlags) .. encodeLen(#payload) .. payload end
-
 local function sendRaw(data) C4:SendToNetwork(NET, PORT, data) end
-
-local function mqttConnect()
-  local clientId = "c4-speakerpoint-" .. tostring(math.random(100000, 999999))
-  local vh = mqttStr("MQTT") .. string.char(4)   -- protocol level 4 = MQTT 3.1.1
-           .. string.char(2)                     -- flags: clean session
-           .. u16(KEEPALIVE)
-  sendRaw(packet(0x10, vh .. mqttStr(clientId)))
-end
-
-local function mqttSubscribe(topic)
-  subPid = subPid + 1
-  sendRaw(packet(0x82, u16(subPid) .. mqttStr(topic) .. string.char(0)))
-end
 
 -- Publish a command. `sub` is relative to the box base, e.g. "cmd/audio/volume".
 local function pub(sub, msg)
@@ -59,10 +31,8 @@ local function pub(sub, msg)
   local topic = base .. "/" .. sub
   dbg("> " .. topic .. " " .. msg)
   prop("Last Command", topic .. " " .. msg)
-  sendRaw(packet(0x30, mqttStr(topic) .. msg))   -- PUBLISH, QoS 0
+  sendRaw(C4MQTT.publish(topic, msg))
 end
-
-local function ping() sendRaw(string.char(0xC0, 0x00)) end
 
 ----------------------------------------------------------------------- state -> proxy
 local function reportVolume()
@@ -112,44 +82,19 @@ local function onMessage(topic, payload)
 end
 
 ----------------------------------------------------------------------- MQTT decode
--- Pull whole packets out of `buffer`; returns the unconsumed tail.
-local function parse(buf)
-  while #buf >= 2 do
-    local b1 = buf:byte(1)
-    local mult, len, i, byte = 1, 0, 2, 0
-    repeat
-      if i > #buf then return buf end        -- length not fully arrived
-      byte = buf:byte(i)
-      len = len + (byte % 128) * mult
-      mult = mult * 128
-      i = i + 1
-      if mult > 128 * 128 * 128 * 128 then return "" end   -- malformed, resync by dropping
-    until byte < 128
-    if #buf < (i - 1) + len then return buf end            -- body not fully arrived
-    local ptype = math.floor(b1 / 16)
-    local flags = b1 % 16
-    local body = buf:sub(i, i - 1 + len)
-    buf = buf:sub(i + len)
-    if ptype == 2 then                                     -- CONNACK
-      if body:byte(2) == 0 then
-        connected = true
-        mqttSubscribe("openspeakerpoint/+/#")
-        if C4.SetTimer then C4:SetTimer(math.floor(KEEPALIVE * 1000 * 0.75), ping, true) end
-      else
-        prop("Status", "CONNACK refused " .. tostring(body:byte(2)))
-      end
-    elseif ptype == 3 then                                 -- PUBLISH
-      local tlen = body:byte(1) * 256 + body:byte(2)
-      local topic = body:sub(3, 2 + tlen)
-      local idx = 3 + tlen
-      local qos = math.floor(flags / 2) % 4
-      if qos > 0 then idx = idx + 2 end                    -- skip packet id (we sub at QoS 0, but be safe)
-      onMessage(topic, body:sub(idx))
+local function onConnack(rc)
+  if rc == 0 then
+    connected = true
+    sendRaw(C4MQTT.subscribe(1, "openspeakerpoint/+/#"))
+    if C4.SetTimer then
+      C4:SetTimer(math.floor(KEEPALIVE * 1000 * 0.75), function() sendRaw(C4MQTT.pingreq()) end, true)
     end
-    -- SUBACK (9) / PINGRESP (13): nothing to do.
+  else
+    prop("Status", "CONNACK refused " .. tostring(rc))
   end
-  return buf
 end
+
+local MQTT_HANDLERS = { connack = onConnack, publish = onMessage }
 
 ----------------------------------------------------------------------- outbound ops
 local function setVolume(level)
@@ -183,15 +128,16 @@ local function transport(t) pub("cmd/transport", t) end
 ----------------------------------------------------------------------- C4 callbacks
 function ReceivedFromNetwork(idBinding, nPort, strData)
   if idBinding ~= NET then return end
-  buffer = parse(buffer .. strData)
+  buffer = C4MQTT.parse(buffer .. strData, MQTT_HANDLERS)
 end
 
 function OnConnectionStatusChanged(idBinding, nPort, strStatus)
   if idBinding ~= NET then return end
   if strStatus == "ONLINE" then
     connected = false
+    buffer = ""
     prop("Status", "socket up, MQTT connecting")
-    mqttConnect()
+    sendRaw(C4MQTT.connect("c4-speakerpoint-" .. tostring(math.random(100000, 999999)), { keepalive = KEEPALIVE }))
   else
     connected = false
     prop("Status", strStatus)

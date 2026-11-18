@@ -24,9 +24,12 @@ State flows back from the box's retained topics (`state/audio/volume|source|outp
 treble|loudness`, `state/now`, `status`) into the proxy (volume/mute) and the read-only
 Properties (Status, Now Playing, Source, Volume).
 
-DriverWorks has no MQTT client, so the driver frames **MQTT 3.1.1 (QoS 0)** itself over the
-TCP binding to the box's mosquitto (`:1883`, anonymous on the LAN). It subscribes
-`openspeakerpoint/+/#` and learns the box's base topic from the first retained message.
+DriverWorks has no MQTT client. The **MQTT 3.1.1 (QoS 0)** framing is the shared
+[`control4-lua-mqtt`](https://github.com/The1TrueJoe/control4-lua-mqtt) lib (a git
+submodule at `control4-lua-mqtt/`), concatenated ahead of the driver body at package
+time. This driver owns only the transport (the `:1883` TCP binding, anonymous on the
+LAN) and the box's topic contract; it subscribes `openspeakerpoint/+/#` and learns the
+box's base topic from the first retained message.
 
 ## Install
 
@@ -38,9 +41,16 @@ TCP binding to the box's mosquitto (`:1883`, anonymous on the LAN). It subscribe
 
 ## Build
 
-CI (`.github/workflows/driver.yml`) runs the `lua5.1` self-check (`test.lua`) then the
-Control4 driver packager, uploading `openspeakerpoint.c4z` as an artifact (and attaching
-it to releases). Locally: `lua5.1 test.lua`.
+`package.sh` assembles `build/driver.lua` (the shared `C4MQTT` codec + `driver.src.lua`)
+and copies the XML/c4zproj into `build/`. CI (`.github/workflows/driver.yml`) checks out
+submodules, runs `./package.sh && lua5.1 test.lua`, then the Control4 driver packager on
+`build/`, uploading `openspeakerpoint.c4z` as an artifact (and attaching it to releases).
+
+Locally (needs the submodule — `git submodule update --init --recursive`):
+
+```sh
+cd drivers/control4 && ./package.sh && lua5.1 test.lua
+```
 
 ## Native Control4 audio streaming to this box — not feasible
 

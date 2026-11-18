@@ -1,6 +1,7 @@
--- Self-check for driver.lua against a stubbed C4 API: cd drivers/control4 && lua test.lua
--- Exercises the MQTT framing (encode + decode, including a split packet) and the
--- proxy/command -> cmd/* mapping. Run on lua5.1, as the controller does.
+-- Self-check for the assembled driver against a stubbed C4 API:
+--   cd drivers/control4 && ./package.sh && lua test.lua
+-- Runs against build/driver.lua (C4MQTT framing + driver body concatenated), so it
+-- exercises the real shared codec plus the proxy/command -> cmd/* mapping. lua5.1.
 
 local sent, notified, props = {}, {}, {}
 C4 = {
@@ -17,7 +18,7 @@ C4 = {
   end,
 }
 Properties = { Debug = "Off", Output = "amp" }
-dofile("driver.lua")
+dofile("build/driver.lua")
 
 -- Build an inbound MQTT PUBLISH (QoS 0) the way a broker would frame it.
 local function u16(n) return string.char(math.floor(n / 256) % 256, n % 256) end

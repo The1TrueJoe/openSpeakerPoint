@@ -25,14 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Driver self-check (Lua 5.1, as on the controller)
+        with:
+          submodules: recursive
+      - name: Assemble + self-check (Lua 5.1, as on the controller)
         working-directory: drivers/control4
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends lua5.1 && lua5.1 test.lua
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends lua5.1
+          ./package.sh && lua5.1 test.lua
       # Pinned to the packager's last (archived) commit: the v1 tag predates the
-      # version/updateModified inputs and silently ignores them.
+      # version/updateModified inputs and silently ignores them. Runs on the assembled
+      # build/ (C4MQTT + driver body concatenated).
       - uses: control4/drivers-driverpackager@c491b3e7e42c012fd2aad8aad3e0b9851e8488cc
         with:
-          projectDir: drivers/control4
+          projectDir: drivers/control4/build
           c4zproj: speakerpoint.c4zproj
           outputDir: ./out
           version: ${{ github.run_number }}
@@ -40,7 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: openspeakerpoint-c4z
-          path: drivers/control4/out/openspeakerpoint.c4z
+          path: drivers/control4/build/out/openspeakerpoint.c4z
           if-no-files-found: error
 
   release:
