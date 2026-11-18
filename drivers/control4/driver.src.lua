@@ -1,9 +1,10 @@
 -- SpeakerPoint (Open): Control4 driver for an openSpeakerPoint box.
 --
--- Control4 sees an audio endpoint (avswitch): it selects a source into it and sets
--- volume; the box carries the audio itself (line-in from the EA3 ADC, or its own
--- USB/AirPlay media). This driver controls the box over its MQTT API and mirrors the
--- box's retained state back to the proxy and to the Properties.
+-- The box is a network-controllable amp whose audio comes in on line-in (aux). Control4
+-- (avswitch) selects this amp and sets volume/tone/output; the box plays whatever is on
+-- aux. Not a media player and not a digital-audio streaming endpoint - no transport or
+-- library controls. This driver controls the box over its MQTT API and mirrors the amp
+-- state (volume/output/tone) back to the proxy and Properties.
 --
 -- DriverWorks has no MQTT client. The MQTT 3.1.1 (QoS 0) framing is the shared
 -- control4-lua-mqtt lib (the global C4MQTT), concatenated ahead of this body by
@@ -11,7 +12,7 @@
 -- mosquitto on :1883, anonymous) and the box's topic contract. Self-check: test.lua.
 
 local NET, PORT, PROXY = 6001, 1883, 5001
-local INPUT_LINEIN, INPUT_MEDIA = 100, 101
+local INPUT_LINEIN = 100
 local OUTPUT = 4000
 local KEEPALIVE = 30
 
@@ -50,8 +51,6 @@ local function onBoxMessage(sub, payload)
     volume = tonumber(payload) or volume
     prop("Volume", volume)
     if not muted then reportVolume() end
-  elseif sub == "state/audio/source" then
-    prop("Source", payload)
   elseif sub == "state/audio/output" then
     prop("Output", payload)
   elseif sub == "state/audio/bass" then
@@ -60,15 +59,6 @@ local function onBoxMessage(sub, payload)
     prop("Treble", payload)
   elseif sub == "state/audio/loudness" then
     prop("Loudness", payload == "ON" and "On" or "Off")
-  elseif sub == "state/now" then
-    local ok, now = pcall(function() return C4:JsonDecode(payload) end)
-    if ok and type(now) == "table" then
-      local who = now.title or now.file or "-"
-      if now.artist then who = who .. " - " .. now.artist end
-      prop("Now Playing", (now.state or "?") .. ": " .. who .. " [" .. (now.source or "?") .. "]")
-    else
-      prop("Now Playing", payload)
-    end
   end
 end
 
@@ -77,7 +67,12 @@ local function onMessage(topic, payload)
   dbg("< " .. topic .. " " .. payload)
   local b, sub = topic:match("^([^/]+/[^/]+)/(.+)$")
   if not b then return end
-  if not base then base = b; prop("Status", "connected (" .. base .. ")") end
+  if not base then
+    base = b
+    prop("Status", "connected (" .. base .. ")")
+    -- Line-in (aux) is this amp's source; make it active as soon as we reach the box.
+    sendRaw(C4MQTT.publish(base .. "/cmd/audio/source", "linein"))
+  end
   if b == base then onBoxMessage(sub, payload) end
 end
 
@@ -122,8 +117,7 @@ local function setMute(on)
   reportMute()
 end
 
-local function setSource(src) pub("cmd/audio/source", src) end
-local function transport(t) pub("cmd/transport", t) end
+local function selectLinein() pub("cmd/audio/source", "linein") end
 
 ----------------------------------------------------------------------- C4 callbacks
 function ReceivedFromNetwork(idBinding, nPort, strData)
@@ -150,14 +144,12 @@ function OnNetworkBindingChanged(idBinding, bIsBound)
   if bIsBound then C4:NetConnect(NET, PORT) end
 end
 
-local INPUT_SOURCE = { [INPUT_LINEIN] = "linein", [INPUT_MEDIA] = "media" }
-
 function ReceivedFromProxy(idBinding, strCommand, tParams)
   tParams = tParams or {}
   dbg("proxy " .. strCommand)
   if strCommand == "SET_INPUT" then
-    local src = INPUT_SOURCE[tonumber(tParams.INPUT)]
-    if src then setSource(src) end
+    -- One input (Line In / aux); selecting the amp just makes aux the active source.
+    selectLinein()
     C4:SendToProxy(PROXY, "INPUT_OUTPUT_CHANGED", { INPUT = tParams.INPUT, OUTPUT = tParams.OUTPUT }, "NOTIFY")
   elseif strCommand == "SET_VOLUME_LEVEL" then
     setVolume(tParams.LEVEL)
@@ -176,22 +168,12 @@ function ReceivedFromProxy(idBinding, strCommand, tParams)
   end
 end
 
--- Programming commands / Actions.
-local TRANSPORT = { Play = "play", Pause = "pause", Stop = "stop", Next = "next", Previous = "prev" }
-
+-- Programming command: switch the amp output relay (amp/rca/both/off).
 function ExecuteCommand(strCommand, tParams)
   tParams = tParams or {}
   dbg("command " .. strCommand)
-  if TRANSPORT[strCommand] then
-    transport(TRANSPORT[strCommand])
-  elseif strCommand == "RescanLibrary" then
-    pub("cmd/library/rescan", "")
-  elseif strCommand == "ReturnToStock" then
-    pub("cmd/system/restore", "confirm")
-  elseif strCommand == "SetOutput" then
+  if strCommand == "SetOutput" then
     pub("cmd/audio/output", tParams.Output or "amp")
-  elseif strCommand == "SetSource" then
-    setSource(tParams.Source or "media")
   end
 end
 

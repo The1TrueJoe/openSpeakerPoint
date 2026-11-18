@@ -16,18 +16,20 @@
     <category>Audio/Video</category>
   </composer_categories>
 
-  <!-- An audio endpoint/amp. Control4 selects a source into it and sets volume; the
-       box itself carries the audio (line-in from the EA3 ADC, or its own USB/AirPlay
-       media). The driver controls it over the box's MQTT API, not a native C4 stream -
-       so no DIGITAL_AUDIO_CLIENT connection here (that is the native-streaming stretch). -->
+  <!-- A network-controllable amp. Its audio comes in on line-in (aux) - the installer
+       routes a source into the "Line In" input (in the test rig, the openHC EA3's analog
+       output). Control4 selects this amp and sets volume/tone/output; the box plays
+       whatever is on aux. It is NOT a media player or a digital-audio streaming endpoint,
+       so there is no DIGITAL_AUDIO_CLIENT connection and no transport/library controls.
+       Control is over the box's MQTT API. -->
   <capabilities>
     <can_switch>True</can_switch>
     <has_discrete_volume_control>True</has_discrete_volume_control>
     <has_up_down_volume_control>True</has_up_down_volume_control>
     <has_discrete_mute_control>True</has_discrete_mute_control>
     <has_toggle_mute_control>True</has_toggle_mute_control>
-    <has_discrete_input_select>True</has_discrete_input_select>
-    <audio_consumer_count>2</audio_consumer_count>
+    <has_discrete_input_select>False</has_discrete_input_select>
+    <audio_consumer_count>1</audio_consumer_count>
     <audio_provider_count>1</audio_provider_count>
     <video_consumer_count>0</video_consumer_count>
     <video_provider_count>0</video_provider_count>
@@ -54,17 +56,12 @@
         <keep_alive>True</keep_alive>
       </port></ports></class></classes></connection>
 
-    <!-- Audio inputs the switch can select. Bind the EA3 ADC / line-level source to
-         "Line In"; "On-Board Media" is the box's own USB/AirPlay player. SET_INPUT one
-         of these -> cmd/audio/source. -->
-    <connection proxybindingid="5001"><id>100</id><facing>6</facing><connectionname>Line In</connectionname>
+    <!-- The amp's single audio input. Bind the line-level source here (the EA3's analog
+         output in the test rig). This is the active source: selecting the amp plays aux. -->
+    <connection proxybindingid="5001"><id>100</id><facing>6</facing><connectionname>Line In (Aux)</connectionname>
       <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
       <linelevel>True</linelevel>
       <classes><class><classname>STEREO</classname></class><class><classname>RCA_IN</classname></class></classes></connection>
-    <connection proxybindingid="5001"><id>101</id><facing>6</facing><connectionname>On-Board Media</connectionname>
-      <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
-      <linelevel>True</linelevel>
-      <classes><class><classname>STEREO</classname></class></classes></connection>
 
     <!-- The speaker output (the box's amp/RCA). Bind the room's speakers here. -->
     <connection proxybindingid="5001"><id>4000</id><facing>6</facing><connectionname>Speaker Output</connectionname>
@@ -83,8 +80,6 @@
     <script file="driver.lua"/>
     <properties>
       <property><name>Status</name><type>STRING</type><readonly>true</readonly><default>not bound</default></property>
-      <property><name>Now Playing</name><type>STRING</type><readonly>true</readonly><default></default></property>
-      <property><name>Source</name><type>STRING</type><readonly>true</readonly><default></default></property>
       <property><name>Volume</name><type>STRING</type><readonly>true</readonly><default></default></property>
       <property><name>Last Command</name><type>STRING</type><readonly>true</readonly><default></default></property>
       <property><name>Output</name><type>LIST</type><items><item>off</item><item>rca</item><item>amp</item><item>both</item></items><default>amp</default></property>
@@ -95,32 +90,11 @@
     </properties>
   </config>
 
-  <!-- Programming actions (Composer "Actions" tab) and commands (usable in Director
-       programming). Transport + library + the return-to-stock, which avswitch has no
-       native command for. -->
-  <actions>
-    <action name="Play"><command>Play</command></action>
-    <action name="Pause"><command>Pause</command></action>
-    <action name="Stop"><command>Stop</command></action>
-    <action name="Next"><command>Next</command></action>
-    <action name="Previous"><command>Previous</command></action>
-    <action name="Rescan Library"><command>RescanLibrary</command></action>
-    <action name="Return to Stock (erases openSpeakerPoint)"><command>ReturnToStock</command></action>
-  </actions>
-
+  <!-- Programming command for the amp output relay (avswitch has no native command for
+       it). Volume/mute come through the proxy; tone is on the Properties. -->
   <commands>
-    <command><name>Play</name></command>
-    <command><name>Pause</name></command>
-    <command><name>Stop</name></command>
-    <command><name>Next</name></command>
-    <command><name>Previous</name></command>
-    <command><name>RescanLibrary</name></command>
-    <command><name>ReturnToStock</name></command>
     <command><name>SetOutput</name>
       <params><param><name>Output</name><type>LIST</type><items><item>off</item><item>rca</item><item>amp</item><item>both</item></items></param></params>
-    </command>
-    <command><name>SetSource</name>
-      <params><param><name>Source</name><type>LIST</type><items><item>media</item><item>linein</item></items></param></params>
     </command>
   </commands>
 </devicedata>
