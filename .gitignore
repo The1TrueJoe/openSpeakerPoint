@@ -20,3 +20,7 @@ venv/
 .claude/
 # Flash dumps of real units: vendor firmware, never committed.
 backups/
+
+# Control4 driver build output
+drivers/control4/build/
+drivers/control4/*.c4z
