@@ -12,6 +12,13 @@
   <controlmethod>ip</controlmethod>
   <driver>DriverWorks</driver>
 
+  <!-- The box announces this SDDP Type (the SDDP announcer in speakerpoint-control); Composer
+       lists it under discovered devices and auto-pairs it with this driver, filling
+       in the MQTT connection's address. No manual add, no typing an IP. -->
+  <search_types>
+    <type>openhc:speakerpoint</type>
+  </search_types>
+
   <composer_categories>
     <category>Audio/Video</category>
   </composer_categories>
