@@ -2,8 +2,8 @@
 <devicedata>
   <copyright>Copyright 2026 Joseph Telaak</copyright>
   <creator>Joseph Telaak</creator>
-  <name>SpeakerPoint (Open)</name>
-  <manufacturer>Open Source</manufacturer>
+  <name>SpeakerPoint</name>
+  <manufacturer>openHC</manufacturer>
   <model>openspeakerpoint</model>
   <created>2026-11-17</created>
   <modified>2026-11-17</modified>
