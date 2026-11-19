@@ -22,7 +22,7 @@ and one output (Speaker):
 
 On connect it sets `cmd/audio/source linein` so aux is the active source. State flows back
 from the box's retained topics (`state/audio/volume|output|bass|treble|loudness`,
-`status`) into the proxy (volume/mute) and the read-only Properties (Status, Volume).
+`status`) into the proxy (volume/mute) and the read-only Properties (Link Status, Volume).
 
 The box's USB/AirPlay media player and its transport/library controls are real but are
 *not* exposed here — in the amp-fed-by-line-in model they'd command a source that isn't
@@ -31,15 +31,17 @@ playing. Drive those directly over MQTT or the box's web UI if needed.
 DriverWorks has no MQTT client. The **MQTT 3.1.1 (QoS 0)** framing is the shared
 [`control4-lua-mqtt`](https://github.com/The1TrueJoe/control4-lua-mqtt) lib (a git
 submodule at `control4-lua-mqtt/`), concatenated ahead of the driver body at package
-time. This driver owns only the transport (the `:1883` TCP binding, anonymous on the
-LAN) and the box's topic contract; it subscribes `openspeakerpoint/+/#` and learns the
-box's base topic from the first retained message.
+time. The driver connects to the broker with `C4:CreateTCPClient` at the box address from
+the `6001` binding (`:1883`, anonymous on the LAN) — the openHC family transport. It
+subscribes `<Topic Prefix>/+/#` (the `Topic Prefix` property, default `openspeakerpoint`)
+and learns the box's base topic from the first retained message.
 
 ## Install
 
 1. Add the driver to the project (My Drivers → the built `openspeakerpoint.c4z`).
-   The box does not speak Control4 SDDP, so add it manually.
-2. On the driver's **Network** tab, set the box's IP (binds the `:1883` connection).
+2. The box announces SDDP (type `openhc:speakerpoint`), so Composer discovers it and
+   auto-pairs it with this driver, filling in the **Network** connection — or set the box
+   IP on the Network tab by hand.
 3. Bind the line-level source (the EA3's analog output in the test rig) to the amp's
    **Line In (Aux)** input, the room's speakers to **Speaker Output**, and a room to
    **Room**.

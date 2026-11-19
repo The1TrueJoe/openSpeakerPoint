@@ -52,21 +52,21 @@
       <videosource>False</videosource><linelevel>False</linelevel>
       <classes><class><classname>AVSWITCH</classname></class></classes><hidden>True</hidden></connection>
 
-    <!-- The box's mosquitto broker. Set the box IP on Composer's Network tab; the driver
-         speaks MQTT 3.1.1 (QoS 0) over this TCP socket. No line delimiter: MQTT is binary. -->
+    <!-- The box's network connection (SDDP fills in the IP, or set it on Composer's
+         Network tab). The driver connects to the mosquitto broker (:1883) at this address
+         with C4:CreateTCPClient and speaks MQTT 3.1.1 (QoS 0). Named after the device,
+         like the openHC family driver's 6001. -->
     <connection><id>6001</id><facing>6</facing><connectionname>SpeakerPoint</connectionname>
       <type>4</type><consumer>True</consumer><audiosource>False</audiosource>
       <videosource>False</videosource><linelevel>True</linelevel>
       <classes><class><classname>TCP</classname><ports><port>
-        <name>MQTT</name><number>1883</number><auto_connect>True</auto_connect>
-        <monitor_connection>True</monitor_connection><keep_connection>True</keep_connection>
-        <keep_alive>True</keep_alive>
+        <name>MQTT</name><number>1883</number>
       </port></ports></class></classes></connection>
 
     <!-- The amp's single audio input (3000-range = audio input, family convention).
          Bind the line-level source here (the EA3's analog output in the test rig). This
          is the active source: selecting the amp plays aux. -->
-    <connection proxybindingid="5001"><id>3000</id><facing>6</facing><connectionname>Line In (Aux)</connectionname>
+    <connection proxybindingid="5001"><id>3001</id><facing>6</facing><connectionname>Line In (Aux)</connectionname>
       <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
       <linelevel>True</linelevel>
       <classes><class><classname>STEREO</classname></class><class><classname>RCA_IN</classname></class></classes></connection>
@@ -87,9 +87,10 @@
   <config>
     <script file="driver.lua"/>
     <properties>
-      <property><name>Status</name><type>STRING</type><readonly>true</readonly><default>not bound</default></property>
+      <property><name>Link Status</name><type>STRING</type><readonly>true</readonly><default>not bound</default></property>
       <property><name>Volume</name><type>STRING</type><readonly>true</readonly><default></default></property>
       <property><name>Last Command</name><type>STRING</type><readonly>true</readonly><default></default></property>
+      <property><name>Topic Prefix</name><type>STRING</type><default>openspeakerpoint</default></property>
       <property><name>Output</name><type>LIST</type><items><item>off</item><item>rca</item><item>amp</item><item>both</item></items><default>amp</default></property>
       <property><name>Bass</name><type>RANGED_INTEGER</type><minimum>-14</minimum><maximum>14</maximum><default>0</default></property>
       <property><name>Treble</name><type>RANGED_INTEGER</type><minimum>-14</minimum><maximum>14</maximum><default>0</default></property>
