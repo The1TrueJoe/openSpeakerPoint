@@ -8,31 +8,30 @@
 --
 -- DriverWorks has no MQTT client. The MQTT 3.1.1 (QoS 0) framing is the shared
 -- control4-lua-mqtt lib (the global C4MQTT), concatenated ahead of this body by
--- package.sh; here we own only the transport (the 6001 TCP binding -> the box's
--- mosquitto on :1883, anonymous) and the box's topic contract. Self-check: test.lua.
+-- package.sh. Transport is C4:CreateTCPClient to the box's mosquitto (:1883, anonymous),
+-- the box IP coming from the 6001 network binding - the same shape as the openHC family
+-- driver. Self-check: test.lua.
 
 local NET, PORT, PROXY = 6001, 1883, 5001
-local INPUT_LINEIN = 100
 local OUTPUT = 4000
-local KEEPALIVE = 30
+local KEEPALIVE = 60
 
-local base           -- "openspeakerpoint/<hostname>", learned from the first message
+local base            -- "<prefix>/<hostname>", learned from the first retained message
 local buffer = ""
-local connected = false
+local gMqtt, gUp, gRetry = nil, false, false
 local volume, muted, premuteVol = 0, false, 0
 
 local function prop(name, value) C4:UpdateProperty(name, tostring(value)) end
 local function dbg(msg) if Properties["Debug"] == "On" then print("[speakerpoint] " .. msg) end end
-
-local function sendRaw(data) C4:SendToNetwork(NET, PORT, data) end
+local function prefix() return Properties["Topic Prefix"] or "openspeakerpoint" end
 
 -- Publish a command. `sub` is relative to the box base, e.g. "cmd/audio/volume".
 local function pub(sub, msg)
-  if not base then dbg("drop " .. sub .. " (box not seen yet)"); return end
+  if not (gUp and base) then dbg("drop " .. sub .. " (not connected)"); return end
   local topic = base .. "/" .. sub
   dbg("> " .. topic .. " " .. msg)
   prop("Last Command", topic .. " " .. msg)
-  sendRaw(C4MQTT.publish(topic, msg))
+  gMqtt:Write(C4MQTT.publish(topic, msg))
 end
 
 ----------------------------------------------------------------------- state -> proxy
@@ -46,7 +45,7 @@ end
 -- A retained box message. `sub` is the topic below the base.
 local function onBoxMessage(sub, payload)
   if sub == "status" then
-    prop("Status", payload)
+    prop("Link Status", "box " .. payload)
   elseif sub == "state/audio/volume" then
     volume = tonumber(payload) or volume
     prop("Volume", volume)
@@ -69,27 +68,48 @@ local function onMessage(topic, payload)
   if not b then return end
   if not base then
     base = b
-    prop("Status", "connected (" .. base .. ")")
+    prop("Link Status", "connected (" .. base .. ")")
     -- Line-in (aux) is this amp's source; make it active as soon as we reach the box.
-    sendRaw(C4MQTT.publish(base .. "/cmd/audio/source", "linein"))
+    gMqtt:Write(C4MQTT.publish(base .. "/cmd/audio/source", "linein"))
   end
   if b == base then onBoxMessage(sub, payload) end
 end
 
------------------------------------------------------------------------ MQTT decode
 local function onConnack(rc)
   if rc == 0 then
-    connected = true
-    sendRaw(C4MQTT.subscribe(1, "openspeakerpoint/+/#"))
-    if C4.SetTimer then
-      C4:SetTimer(math.floor(KEEPALIVE * 1000 * 0.75), function() sendRaw(C4MQTT.pingreq()) end, true)
-    end
+    gUp = true
+    gMqtt:Write(C4MQTT.subscribe(1, prefix() .. "/+/#"))
   else
-    prop("Status", "CONNACK refused " .. tostring(rc))
+    prop("Link Status", "CONNACK refused " .. tostring(rc))
   end
 end
 
 local MQTT_HANDLERS = { connack = onConnack, publish = onMessage }
+
+----------------------------------------------------------------------- transport (TCP)
+local connect
+local function retry(why)
+  gUp = false
+  prop("Link Status", why)
+  if gRetry then return end
+  gRetry = true
+  C4:SetTimer(5000, function() gRetry = false; connect() end)
+end
+
+connect = function()
+  local ip = C4:GetBindingAddress(NET)
+  if not ip or ip == "" then prop("Link Status", "no box address - set it on the Network tab"); return end
+  if gMqtt then pcall(function() gMqtt:Close() end) end
+  gUp, buffer, base = false, "", nil
+  prop("Link Status", "connecting " .. ip)
+  local clientId = "c4-speakerpoint-" .. tostring(math.random(100000, 999999))
+  gMqtt = C4:CreateTCPClient()
+    :OnConnect(function(c) c:Write(C4MQTT.connect(clientId, { keepalive = KEEPALIVE })); c:ReadAtLeast(1) end)
+    :OnRead(function(c, data) buffer = C4MQTT.parse(buffer .. data, MQTT_HANDLERS); c:ReadAtLeast(1) end)
+    :OnDisconnect(function() retry("disconnected") end)
+    :OnError(function(_, e) retry("error: " .. tostring(e)) end)
+    :Connect(ip, PORT)
+end
 
 ----------------------------------------------------------------------- outbound ops
 local function setVolume(level)
@@ -120,28 +140,9 @@ end
 local function selectLinein() pub("cmd/audio/source", "linein") end
 
 ----------------------------------------------------------------------- C4 callbacks
-function ReceivedFromNetwork(idBinding, nPort, strData)
-  if idBinding ~= NET then return end
-  buffer = C4MQTT.parse(buffer .. strData, MQTT_HANDLERS)
-end
-
-function OnConnectionStatusChanged(idBinding, nPort, strStatus)
-  if idBinding ~= NET then return end
-  if strStatus == "ONLINE" then
-    connected = false
-    buffer = ""
-    prop("Status", "socket up, MQTT connecting")
-    sendRaw(C4MQTT.connect("c4-speakerpoint-" .. tostring(math.random(100000, 999999)), { keepalive = KEEPALIVE }))
-  else
-    connected = false
-    prop("Status", strStatus)
-  end
-end
-
 function OnNetworkBindingChanged(idBinding, bIsBound)
   if idBinding ~= NET then return end
-  prop("Status", bIsBound and "bound, connecting" or "not bound")
-  if bIsBound then C4:NetConnect(NET, PORT) end
+  if bIsBound then connect() else prop("Link Status", "not bound") end
 end
 
 function ReceivedFromProxy(idBinding, strCommand, tParams)
@@ -192,6 +193,9 @@ function OnPropertyChanged(strProperty)
 end
 
 function OnDriverLateInit()
-  prop("Status", "connecting")
-  C4:NetConnect(NET, PORT)
+  if C4.SetTimer then
+    C4:SetTimer(math.floor(KEEPALIVE * 1000 * 0.75),
+      function() if gUp and gMqtt then pcall(function() gMqtt:Write(C4MQTT.pingreq()) end) end end, true)
+  end
+  connect()
 end
