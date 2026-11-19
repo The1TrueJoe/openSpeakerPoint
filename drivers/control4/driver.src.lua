@@ -1,4 +1,4 @@
--- SpeakerPoint (Open): Control4 driver for an openSpeakerPoint box.
+-- SpeakerPoint: Control4 driver for an openSpeakerPoint box.
 --
 -- The box is a network-controllable amp whose audio comes in on line-in (aux). Control4
 -- (avswitch) selects this amp and sets volume/tone/output; the box plays whatever is on
