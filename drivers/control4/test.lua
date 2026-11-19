@@ -48,7 +48,7 @@ ReceivedFromProxy(5001, "SET_VOLUME_LEVEL", { OUTPUT = "4000", LEVEL = "250" })
 assert(last():sub(-3) == "100", "volume clamps to 100")
 
 -- 5) SET_INPUT (room selects the amp) -> force linein.
-ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "100", OUTPUT = "4000" })
+ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "3000", OUTPUT = "4000" })
 assert(last():find("cmd/audio/source", 1, true) and last():sub(-6) == "linein", last())
 
 -- 6) Mute emulated via volume 0, then restore.

@@ -12,7 +12,6 @@
 -- mosquitto on :1883, anonymous) and the box's topic contract. Self-check: test.lua.
 
 local NET, PORT, PROXY = 6001, 1883, 5001
-local INPUT_LINEIN = 100
 local OUTPUT = 4000
 local KEEPALIVE = 30
 

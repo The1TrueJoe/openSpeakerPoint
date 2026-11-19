@@ -4,7 +4,7 @@
   <creator>Joseph Telaak</creator>
   <name>SpeakerPoint</name>
   <manufacturer>openHC</manufacturer>
-  <model>openspeakerpoint</model>
+  <model>openhc-speakerpoint</model>
   <created>2026-11-17</created>
   <modified>2026-11-17</modified>
   <version>1</version>
@@ -54,7 +54,7 @@
 
     <!-- The box's mosquitto broker. Set the box IP on Composer's Network tab; the driver
          speaks MQTT 3.1.1 (QoS 0) over this TCP socket. No line delimiter: MQTT is binary. -->
-    <connection><id>6001</id><facing>6</facing><connectionname>MQTT (box)</connectionname>
+    <connection><id>6001</id><facing>6</facing><connectionname>SpeakerPoint</connectionname>
       <type>4</type><consumer>True</consumer><audiosource>False</audiosource>
       <videosource>False</videosource><linelevel>True</linelevel>
       <classes><class><classname>TCP</classname><ports><port>
@@ -63,9 +63,10 @@
         <keep_alive>True</keep_alive>
       </port></ports></class></classes></connection>
 
-    <!-- The amp's single audio input. Bind the line-level source here (the EA3's analog
-         output in the test rig). This is the active source: selecting the amp plays aux. -->
-    <connection proxybindingid="5001"><id>100</id><facing>6</facing><connectionname>Line In (Aux)</connectionname>
+    <!-- The amp's single audio input (3000-range = audio input, family convention).
+         Bind the line-level source here (the EA3's analog output in the test rig). This
+         is the active source: selecting the amp plays aux. -->
+    <connection proxybindingid="5001"><id>3000</id><facing>6</facing><connectionname>Line In (Aux)</connectionname>
       <type>6</type><consumer>True</consumer><audiosource>False</audiosource><videosource>False</videosource>
       <linelevel>True</linelevel>
       <classes><class><classname>STEREO</classname></class><class><classname>RCA_IN</classname></class></classes></connection>
