@@ -19,6 +19,7 @@
 #include "httpio.h"
 #include "mqtt.h"
 #include "player.h"
+#include "sddp.h"
 #include "wsbridge.h"
 
 #include <errno.h>
@@ -250,6 +251,7 @@ int main(void)
     player_start();
     airplay_start();
     mqtt_start();
+    sddp_start();   /* Control4 SDDP discovery announcer */
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -286,6 +288,7 @@ int main(void)
         int maxfd = server_fd;
         maxfd = mqtt_fdset(&rfds, &wfds, maxfd);
         maxfd = ws_fdset(&rfds, maxfd);
+        maxfd = sddp_fdset(&rfds, maxfd);
 
         /* Optional media-engine fd, if it has one to watch. */
         int pfd = player_status_fd();
@@ -304,10 +307,12 @@ int main(void)
         player_tick();
         audio_tick();
         mqtt_tick();
+        sddp_tick();
         if (n == 0) continue;   /* timeout only */
 
         mqtt_service(&rfds, &wfds);
         ws_service(&rfds);
+        sddp_service(&rfds);
 
         if (pfd >= 0 && FD_ISSET(pfd, &rfds)) {
             player_poll();
@@ -377,6 +382,7 @@ int main(void)
     }
 
     ws_close_all();
+    sddp_stop();
     mqtt_stop();
     close(server_fd);
     return 0;
