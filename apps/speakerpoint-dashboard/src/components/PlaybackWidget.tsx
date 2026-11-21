@@ -43,7 +43,9 @@ export function PlaybackWidget({ onOpenNowPlaying, className }: PlaybackWidgetPr
 
   const current = state.data;
   const muted = current?.output === "off";
-  const [lastOutput, setLastOutput] = useState<Exclude<OutputMode, "off">>("both");
+  // Unmuting a page that opened muted goes to the speakers - the amp is what a
+  // SpeakerPoint is for (it used to pick "both").
+  const [lastOutput, setLastOutput] = useState<Exclude<OutputMode, "off">>("amp");
 
   useEffect(() => {
     if (current && current.output !== "off") setLastOutput(current.output);

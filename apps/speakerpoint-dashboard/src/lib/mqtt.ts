@@ -84,6 +84,46 @@ function decode(raw: string): unknown {
   return t;
 }
 
+/**
+ * Audio commands are applied to the snapshot the moment they're sent: the box
+ * publishes the retained state 1-2 s after it acts, and waiting for that made
+ * every control lag and the volume slider snap back on release. Until the box
+ * echoes the value we sent (or 3 s pass), older echoes - a drag's intermediate
+ * volumes landing late - are ignored, so the control doesn't jump backwards.
+ */
+const OPTIMISTIC: Record<string, (v: string) => Partial<Snapshot>> = {
+  "audio/output": (v) => ({ output: v as OutputMode }),
+  "audio/source": (v) => ({ source: v as SourceMode }),
+  "audio/volume": (v) => ({ volume: Number(v) }),
+  "audio/bass": (v) => ({ bass: Number(v) }),
+  "audio/treble": (v) => ({ treble: Number(v) }),
+  "audio/loudness": (v) => ({ loudness: v === "ON" }),
+};
+const pending = new Map<string, { value: string; until: number; held?: [string, Buffer] }>();
+
+/** False while a newer command for this state is still on its way; the held
+ * echo is replayed when the window closes, so the box always has the last word
+ * (e.g. a value it clamped). */
+function settled(path: string, raw: string, topic: string, payload: Buffer): boolean {
+  const p = pending.get(path);
+  if (!p) return true;
+  if (p.value === raw || Date.now() > p.until) {
+    pending.delete(path);
+    return true;
+  }
+  if (!p.held) {
+    setTimeout(() => {
+      const q = pending.get(path);
+      if (q?.held) {
+        pending.delete(path);
+        onMessage(...q.held);
+      }
+    }, p.until - Date.now() + 10);
+  }
+  p.held = [topic, payload];
+  return false;
+}
+
 function onMessage(topic: string, payload: Buffer) {
   const parts = topic.split("/");
   if (parts[0] !== PREFIX || parts.length < 3) return;
@@ -92,6 +132,8 @@ function onMessage(topic: string, payload: Buffer) {
   if (base !== snap.base) return;
 
   const path = parts.slice(2).join("/");
+  if (path.startsWith("state/audio/") && !settled(path.slice("state/".length), payload.toString().trim(), topic, payload))
+    return;
   const value = decode(payload.toString());
   switch (path) {
     case "status":
@@ -136,6 +178,11 @@ function connect() {
 export function command(path: string, value: string | number = "") {
   if (!client || !snap.base) return;
   client.publish(`${snap.base}/cmd/${path}`, String(value), { qos: 1 });
+  const apply = OPTIMISTIC[path];
+  if (apply) {
+    pending.set(path, { value: String(value), until: Date.now() + 3000 });
+    update(apply(String(value)));
+  }
 }
 
 function subscribe(l: () => void) {
